@@ -16,6 +16,15 @@ export function createToolbar(): HTMLDivElement {
   return toolbar;
 }
 
+export interface LabeledSliderControl {
+  element: HTMLElement;
+  input: HTMLInputElement;
+  setDisabled: (disabled: boolean) => void;
+  setLabel: (label: string) => void;
+  setRange: (min: number, max: number, step: number) => void;
+  setValue: (value: number) => void;
+}
+
 export function createLabeledSlider(
   label: string,
   min: number,
@@ -23,7 +32,7 @@ export function createLabeledSlider(
   step: number,
   value: number,
   onChange: (value: number) => void
-): HTMLElement {
+): LabeledSliderControl {
   const wrapper = document.createElement("label");
   wrapper.className = "hand-note-slider";
 
@@ -39,5 +48,23 @@ export function createLabeledSlider(
   input.addEventListener("input", () => onChange(Number(input.value)));
 
   wrapper.append(text, input);
-  return wrapper;
+  return {
+    element: wrapper,
+    input,
+    setDisabled: (disabled) => {
+      input.disabled = disabled;
+      wrapper.classList.toggle("is-disabled", disabled);
+    },
+    setLabel: (label) => {
+      text.textContent = label;
+    },
+    setRange: (nextMin, nextMax, nextStep) => {
+      input.min = String(nextMin);
+      input.max = String(nextMax);
+      input.step = String(nextStep);
+    },
+    setValue: (nextValue) => {
+      input.value = String(nextValue);
+    }
+  };
 }

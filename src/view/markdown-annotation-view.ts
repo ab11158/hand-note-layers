@@ -15,9 +15,9 @@ import {
   loadAnnotation,
   saveAnnotation
 } from "../storage/annotation-store";
+import { AnnotationToolbar } from "./annotation-toolbar";
 import { InkCanvas } from "./ink-canvas";
 import { LayerPanel } from "./layer-panel";
-import { createIconButton, createLabeledSlider, createToolbar } from "./ui";
 
 export const MARKDOWN_ANNOTATION_VIEW_TYPE = "hand-note-markdown-annotation";
 
@@ -26,17 +26,23 @@ export class MarkdownAnnotationView extends ItemView {
   private document: AnnotationDocument | null = null;
   private inkCanvas: InkCanvas | null = null;
   private layerPanel: LayerPanel | null = null;
-  private toolbar: HTMLDivElement;
-  private layerButton: HTMLButtonElement;
-  private penButton: HTMLButtonElement;
-  private eraserButton: HTMLButtonElement;
+  private annotationToolbar: AnnotationToolbar | null = null;
   private markdownBody: HTMLDivElement;
   private surface: HTMLDivElement;
   private saveTimer: number | null = null;
   private currentTool: AnnotationTool = "pen";
+  private previousDrawingTool: AnnotationTool = "pen";
   private currentColor = "#2563eb";
-  private currentSize = 4;
-  private currentEraserSize = 24;
+  private toolSizes: Record<AnnotationTool, number> = {
+    hand: 4,
+    pen: 4,
+    pencil: 3,
+    highlighter: 18,
+    eraser: 28
+  };
+  private pressureEnabled = true;
+  private fingerDrawingEnabled = false;
+  private pencilShortcutEnabled = true;
 
   constructor(leaf: WorkspaceLeaf) {
     super(leaf);
@@ -126,10 +132,13 @@ export class MarkdownAnnotationView extends ItemView {
       getDocument: () => this.document as AnnotationDocument,
       getTool: () => this.currentTool,
       getColor: () => this.currentColor,
-      getSize: () => this.currentSize,
-      getEraserSize: () => this.currentEraserSize,
+      getSize: () => this.toolSizes[this.currentTool],
+      getEraserSize: () => this.toolSizes.eraser,
+      getPressureEnabled: () => this.pressureEnabled,
+      getFingerDrawingEnabled: () => this.fingerDrawingEnabled,
       onDocumentChange: (next) => this.handleDocumentChange(next),
-      onInteraction: () => undefined
+      onInteraction: () => undefined,
+      onPencilShortcut: () => this.togglePenAndEraser()
     });
     this.surface.append(this.inkCanvas.canvas);
 
@@ -141,69 +150,46 @@ export class MarkdownAnnotationView extends ItemView {
       window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
-    if (this.sourceFile && this.document) {
-      await saveAnnotation(this.app, this.sourceFile, this.document);
-    }
+    await this.flushSave();
     this.inkCanvas?.destroy();
     this.inkCanvas = null;
     this.layerPanel = null;
+    this.annotationToolbar = null;
     this.document = null;
     this.sourceFile = null;
   }
 
   private buildToolbar(): void {
-    this.toolbar = createToolbar();
-
-    this.penButton = createIconButton("pencil", "钢笔");
-    this.penButton.addEventListener("click", () => this.setTool("pen"));
-    this.penButton.classList.add("is-active");
-
-    this.eraserButton = createIconButton("eraser", "橡皮擦");
-    this.eraserButton.addEventListener("click", () => this.setTool("eraser"));
-
-    const undoButton = createIconButton("undo", "撤销");
-    undoButton.addEventListener("click", () => this.inkCanvas?.undo());
-
-    const redoButton = createIconButton("redo", "重做");
-    redoButton.addEventListener("click", () => this.inkCanvas?.redo());
-
-    const clearButton = createIconButton("trash-2", "清除当前层");
-    clearButton.addEventListener("click", () => this.inkCanvas?.clearActiveLayer());
-
-    const color = document.createElement("input");
-    color.type = "color";
-    color.value = this.currentColor;
-    color.className = "hand-note-color";
-    color.setAttribute("aria-label", "笔迹颜色");
-    color.addEventListener("input", () => {
-      this.currentColor = color.value;
+    this.annotationToolbar = new AnnotationToolbar({
+      initialTool: this.currentTool,
+      initialColor: this.currentColor,
+      initialPressureEnabled: this.pressureEnabled,
+      initialFingerDrawingEnabled: this.fingerDrawingEnabled,
+      initialPencilShortcutEnabled: this.pencilShortcutEnabled,
+      getSize: (tool) => this.toolSizes[tool],
+      onToolChange: (tool) => this.setTool(tool),
+      onColorChange: (color) => this.setColor(color),
+      onSizeChange: (tool, size) => {
+        this.toolSizes[tool] = size;
+      },
+      onPressureChange: (enabled) => {
+        this.pressureEnabled = enabled;
+        this.annotationToolbar?.setPressureEnabled(enabled);
+      },
+      onFingerDrawingChange: (enabled) => this.setFingerDrawingEnabled(enabled),
+      onPencilShortcutChange: (enabled) => {
+        this.pencilShortcutEnabled = enabled;
+        this.annotationToolbar?.setPencilShortcutEnabled(enabled);
+      },
+      onUndo: () => this.inkCanvas?.undo(),
+      onRedo: () => this.inkCanvas?.redo(),
+      onClear: () => this.inkCanvas?.clearActiveLayer(),
+      onSave: () => void this.flushSave(),
+      onLayers: () => {
+        this.toggleLayerPanel(!this.layerPanel?.element.classList.contains("is-open"));
+      }
     });
-
-    const sizeSlider = createLabeledSlider("笔宽", 1, 24, 1, this.currentSize, (value) => {
-      this.currentSize = value;
-    });
-
-    const eraserSlider = createLabeledSlider("橡皮", 8, 80, 1, this.currentEraserSize, (value) => {
-      this.currentEraserSize = value;
-    });
-
-    this.layerButton = createIconButton("layers", "笔记层");
-    this.layerButton.addEventListener("click", () => {
-      this.toggleLayerPanel(!this.layerPanel?.element.classList.contains("is-open"));
-    });
-
-    this.toolbar.append(
-      this.penButton,
-      this.eraserButton,
-      undoButton,
-      redoButton,
-      clearButton,
-      color,
-      sizeSlider,
-      eraserSlider,
-      this.layerButton
-    );
-    this.contentEl.append(this.toolbar);
+    this.contentEl.append(this.annotationToolbar.element);
   }
 
   private buildMarkdownSurface(): void {
@@ -238,9 +224,32 @@ export class MarkdownAnnotationView extends ItemView {
   }
 
   private setTool(tool: AnnotationTool): void {
+    if (tool !== "hand" && tool !== "eraser") {
+      this.previousDrawingTool = tool;
+    }
     this.currentTool = tool;
-    this.penButton.classList.toggle("is-active", tool === "pen");
-    this.eraserButton.classList.toggle("is-active", tool === "eraser");
+    this.annotationToolbar?.setTool(tool);
+    this.inkCanvas?.updateInputMode();
+  }
+
+  private setColor(color: string): void {
+    this.currentColor = color;
+    this.annotationToolbar?.setColor(color);
+  }
+
+  private setFingerDrawingEnabled(enabled: boolean): void {
+    this.fingerDrawingEnabled = enabled;
+    this.annotationToolbar?.setFingerDrawingEnabled(enabled);
+    this.inkCanvas?.updateInputMode();
+  }
+
+  togglePenAndEraser(): void {
+    if (!this.pencilShortcutEnabled) {
+      return;
+    }
+    this.setTool(
+      this.currentTool === "eraser" ? this.previousDrawingTool : "eraser"
+    );
   }
 
   private handleDocumentChange(document: AnnotationDocument): void {
@@ -255,11 +264,32 @@ export class MarkdownAnnotationView extends ItemView {
       window.clearTimeout(this.saveTimer);
     }
 
+    this.annotationToolbar?.setSaveStatus("saving");
     this.saveTimer = window.setTimeout(() => {
-      if (this.sourceFile && this.document) {
-        void saveAnnotation(this.app, this.sourceFile, this.document);
-      }
-    }, 500);
+      this.saveTimer = null;
+      void this.flushSave();
+    }, 350);
+  }
+
+  private async flushSave(): Promise<void> {
+    if (this.saveTimer !== null) {
+      window.clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    const sourceFile = this.sourceFile;
+    const document = this.document;
+    if (!sourceFile || !document) {
+      return;
+    }
+
+    this.annotationToolbar?.setSaveStatus("saving");
+    try {
+      await saveAnnotation(this.app, sourceFile, document);
+      this.annotationToolbar?.setSaveStatus("saved");
+    } catch (error) {
+      console.error("Hand Note Layers: failed to save Markdown annotation", error);
+      this.annotationToolbar?.setSaveStatus("error");
+    }
   }
 
   private addLayer(): void {

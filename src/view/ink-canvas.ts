@@ -15,8 +15,11 @@ export interface InkCanvasOptions {
   getColor: () => string;
   getSize: () => number;
   getEraserSize: () => number;
+  getPressureEnabled: () => boolean;
+  getFingerDrawingEnabled: () => boolean;
   onDocumentChange: (document: AnnotationDocument) => void;
   onInteraction?: (type: "stroke-start" | "stroke-end" | "erase") => void;
+  onPencilShortcut?: () => void;
   pageIndex?: number;
 }
 
@@ -26,6 +29,8 @@ export class InkCanvas {
   private readonly options: InkCanvasOptions;
   private activeStroke: AnnotationStroke | null = null;
   private activePointerId: number | null = null;
+  private activeTool: AnnotationTool | null = null;
+  private eraserChanged = false;
   private undoStack: AnnotationDocument[] = [];
   private redoStack: AnnotationDocument[] = [];
   private observer: ResizeObserver | null = null;
@@ -34,7 +39,6 @@ export class InkCanvas {
     this.options = options;
     this.canvas = document.createElement("canvas");
     this.canvas.className = "hand-note-canvas";
-    this.canvas.style.touchAction = "none";
     this.canvas.style.position = "absolute";
     this.canvas.style.inset = "0";
     this.canvas.style.width = "100%";
@@ -51,6 +55,7 @@ export class InkCanvas {
     this.canvas.addEventListener("pointermove", this.handlePointerMove);
     this.canvas.addEventListener("pointerup", this.handlePointerUp);
     this.canvas.addEventListener("pointercancel", this.handlePointerUp);
+    this.updateInputMode();
 
     if (typeof ResizeObserver !== "undefined") {
       this.observer = new ResizeObserver(() => this.render());
@@ -71,8 +76,19 @@ export class InkCanvas {
   setDocument(_document: AnnotationDocument): void {
     this.activeStroke = null;
     this.activePointerId = null;
+    this.activeTool = null;
+    this.eraserChanged = false;
     this.resetHistory();
     this.render();
+  }
+
+  updateInputMode(): void {
+    const tool = this.options.getTool();
+    const fingerDrawingEnabled = this.options.getFingerDrawingEnabled();
+    this.canvas.style.pointerEvents = tool === "hand" ? "none" : "auto";
+    this.canvas.style.touchAction = fingerDrawingEnabled ? "none" : "pan-x pan-y";
+    this.canvas.style.cursor =
+      tool === "eraser" ? "cell" : tool === "hand" ? "grab" : "crosshair";
   }
 
   resetHistory(): void {
@@ -88,6 +104,8 @@ export class InkCanvas {
 
     this.activeStroke = null;
     this.activePointerId = null;
+    this.activeTool = null;
+    this.eraserChanged = false;
     this.redoStack.push(cloneDocument(this.options.getDocument()));
     this.options.onDocumentChange(previous);
   }
@@ -100,6 +118,8 @@ export class InkCanvas {
 
     this.activeStroke = null;
     this.activePointerId = null;
+    this.activeTool = null;
+    this.eraserChanged = false;
     this.undoStack.push(cloneDocument(this.options.getDocument()));
     this.options.onDocumentChange(next);
   }
@@ -151,21 +171,29 @@ export class InkCanvas {
         if (this.options.pageIndex !== undefined && stroke.pageIndex !== this.options.pageIndex) {
           continue;
         }
-        this.drawStroke(stroke, rect.width, rect.height);
+        this.drawStroke(stroke, rect.width, rect.height, layer.opacity);
       }
     }
 
     this.context.globalAlpha = 1;
   }
 
-  private drawStroke(stroke: AnnotationStroke, width: number, height: number): void {
+  private drawStroke(
+    stroke: AnnotationStroke,
+    width: number,
+    height: number,
+    layerOpacity: number
+  ): void {
     if (stroke.points.length === 0) {
       return;
     }
 
     const context = this.context;
     context.save();
-    context.lineCap = "round";
+    context.globalAlpha = layerOpacity * (stroke.opacity ?? this.defaultOpacity(stroke.tool));
+    context.globalCompositeOperation =
+      stroke.tool === "highlighter" ? "multiply" : "source-over";
+    context.lineCap = stroke.tool === "highlighter" ? "square" : "round";
     context.lineJoin = "round";
     context.strokeStyle = stroke.color;
 
@@ -178,7 +206,7 @@ export class InkCanvas {
     const points = stroke.points;
     if (points.length === 1) {
       const point = this.normalizePoint(points[0], width, height);
-      context.lineWidth = this.pressureWidth(stroke.size, points[0].pressure);
+      context.lineWidth = this.pressureWidth(stroke, points[0].pressure);
       context.beginPath();
       context.arc(point.x, point.y, context.lineWidth / 2, 0, Math.PI * 2);
       context.fillStyle = stroke.color;
@@ -196,7 +224,7 @@ export class InkCanvas {
       const current = this.normalizePoint(points[index], width, height);
       const middleX = (previous.x + current.x) / 2;
       const middleY = (previous.y + current.y) / 2;
-      context.lineWidth = this.pressureWidth(stroke.size, current.pressure);
+      context.lineWidth = this.pressureWidth(stroke, current.pressure);
       context.quadraticCurveTo(previous.x, previous.y, middleX, middleY);
     }
 
@@ -214,13 +242,41 @@ export class InkCanvas {
     };
   }
 
-  private pressureWidth(size: number, pressure: number): number {
+  private pressureWidth(stroke: AnnotationStroke, pressure: number): number {
+    if (stroke.tool === "highlighter" || !this.options.getPressureEnabled()) {
+      return stroke.size;
+    }
     const normalized = Number.isFinite(pressure) ? Math.max(0, Math.min(1, pressure)) : 0.5;
-    return Math.max(1, size * (0.35 + normalized * 1.15));
+    const minimum = stroke.tool === "pencil" ? 0.25 : 0.35;
+    const range = stroke.tool === "pencil" ? 1.35 : 1.15;
+    return Math.max(1, stroke.size * (minimum + normalized * range));
+  }
+
+  private defaultOpacity(tool: AnnotationTool): number {
+    if (tool === "highlighter") {
+      return 0.32;
+    }
+    if (tool === "pencil") {
+      return 0.78;
+    }
+    return 1;
   }
 
   private handlePointerDown = (event: PointerEvent): void => {
     if (this.activePointerId !== null) {
+      return;
+    }
+
+    const tool = this.options.getTool();
+    if (tool === "hand") {
+      return;
+    }
+    if (event.pointerType === "touch" && !this.options.getFingerDrawingEnabled()) {
+      return;
+    }
+    if (this.isStylusShortcut(event)) {
+      event.preventDefault();
+      this.options.onPencilShortcut?.();
       return;
     }
 
@@ -233,12 +289,16 @@ export class InkCanvas {
     event.preventDefault();
     this.canvas.setPointerCapture(event.pointerId);
     this.activePointerId = event.pointerId;
+    this.activeTool = tool;
 
     const point = this.pointFromEvent(event);
-    const tool = this.options.getTool();
 
     if (tool === "eraser") {
-      this.eraseAtPoint(document, layer, point);
+      this.pushHistory(document);
+      this.eraserChanged = this.eraseAtPoint(layer, point);
+      if (this.eraserChanged) {
+        this.render();
+      }
       return;
     }
 
@@ -248,6 +308,7 @@ export class InkCanvas {
       tool,
       color: this.options.getColor(),
       size: this.options.getSize(),
+      opacity: this.defaultOpacity(tool),
       points: [point],
       pageIndex: this.options.pageIndex
     };
@@ -264,6 +325,15 @@ export class InkCanvas {
 
     event.preventDefault();
     const point = this.pointFromEvent(event);
+
+    if (this.activeTool === "eraser") {
+      const layer = getActiveLayer(this.options.getDocument());
+      if (layer && this.eraseAtPoint(layer, point)) {
+        this.eraserChanged = true;
+        this.render();
+      }
+      return;
+    }
 
     if (!this.activeStroke) {
       return;
@@ -282,7 +352,16 @@ export class InkCanvas {
       this.canvas.releasePointerCapture(event.pointerId);
     }
 
-    if (this.activeStroke) {
+    if (this.activeTool === "eraser") {
+      if (this.eraserChanged) {
+        this.options.onInteraction?.("erase");
+        this.options.onDocumentChange(this.options.getDocument());
+      } else {
+        this.undoStack.pop();
+      }
+      this.eraserChanged = false;
+      this.render();
+    } else if (this.activeStroke) {
       this.activeStroke = null;
       this.options.onInteraction?.("stroke-end");
       this.options.onDocumentChange(this.options.getDocument());
@@ -290,17 +369,13 @@ export class InkCanvas {
     }
 
     this.activePointerId = null;
+    this.activeTool = null;
   };
 
-  private eraseAtPoint(
-    document: AnnotationDocument,
-    layer: AnnotationLayer,
-    point: StrokePoint
-  ): void {
+  private eraseAtPoint(layer: AnnotationLayer, point: StrokePoint): boolean {
     const eraserRadius = this.options.getEraserSize() / 2;
     let removed = false;
 
-    this.pushHistory(document);
     for (let index = layer.strokes.length - 1; index >= 0; index -= 1) {
       const stroke = layer.strokes[index];
       if (this.strokeHitTest(stroke, point, eraserRadius)) {
@@ -309,13 +384,14 @@ export class InkCanvas {
       }
     }
 
-    if (removed) {
-      this.options.onDocumentChange(document);
-      this.options.onInteraction?.("erase");
-      this.render();
-    } else {
-      this.undoStack.pop();
-    }
+    return removed;
+  }
+
+  private isStylusShortcut(event: PointerEvent): boolean {
+    return (
+      event.pointerType === "pen" &&
+      (event.button === 2 || event.button === 5 || (event.buttons & 34) !== 0)
+    );
   }
 
   private strokeHitTest(stroke: AnnotationStroke, point: StrokePoint, radius: number): boolean {

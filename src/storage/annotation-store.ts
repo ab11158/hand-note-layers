@@ -5,6 +5,7 @@ import {
 } from "../model/annotation";
 
 const ANNOTATION_ROOT = ".hand-note-layers";
+const saveQueues = new Map<string, Promise<void>>();
 
 export function getAnnotationPath(source: TFile): string {
   return normalizePath(`${ANNOTATION_ROOT}/${source.path}.json`);
@@ -17,9 +18,27 @@ async function ensureFolder(app: App, path: string): Promise<void> {
   for (const part of parts) {
     current = current ? `${current}/${part}` : part;
     if (!(await app.vault.adapter.exists(current))) {
-      await app.vault.adapter.mkdir(current);
+      try {
+        await app.vault.adapter.mkdir(current);
+      } catch (error) {
+        if (!(await app.vault.adapter.exists(current))) {
+          throw error;
+        }
+      }
     }
   }
+}
+
+function migrateTool(tool: unknown): AnnotationDocument["layers"][number]["strokes"][number]["tool"] {
+  if (
+    tool === "pen" ||
+    tool === "pencil" ||
+    tool === "highlighter" ||
+    tool === "eraser"
+  ) {
+    return tool;
+  }
+  return "pen";
 }
 
 function migrateDocument(value: unknown, sourcePath: string): AnnotationDocument {
@@ -40,9 +59,11 @@ function migrateDocument(value: unknown, sourcePath: string): AnnotationDocument
       strokes: Array.isArray(layer.strokes)
         ? layer.strokes.map((stroke) => ({
             id: stroke.id,
-            tool: stroke.tool === "eraser" ? "eraser" : "pen",
+            tool: migrateTool(stroke.tool),
             color: stroke.color ?? "#1f2937",
             size: stroke.size ?? 4,
+            opacity:
+              stroke.opacity ?? (stroke.tool === "highlighter" ? 0.32 : undefined),
             points: Array.isArray(stroke.points)
               ? stroke.points.map((point) => ({
                   x: point.x,
@@ -84,13 +105,29 @@ export async function saveAnnotation(
   document: AnnotationDocument
 ): Promise<void> {
   const path = getAnnotationPath(source);
-  await ensureFolder(app, path);
   document.updatedAt = Date.now();
-  await app.vault.adapter.write(path, JSON.stringify(document, null, 2));
+  const snapshot = JSON.stringify(document, null, 2);
+  const previous = saveQueues.get(path) ?? Promise.resolve();
+  const next = previous
+    .catch(() => undefined)
+    .then(async () => {
+      await ensureFolder(app, path);
+      await app.vault.adapter.write(path, snapshot);
+    });
+
+  saveQueues.set(path, next);
+  try {
+    await next;
+  } finally {
+    if (saveQueues.get(path) === next) {
+      saveQueues.delete(path);
+    }
+  }
 }
 
 export async function deleteAnnotation(app: App, source: TFile): Promise<void> {
   const path = getAnnotationPath(source);
+  await saveQueues.get(path)?.catch(() => undefined);
   if (await app.vault.adapter.exists(path)) {
     await app.vault.adapter.remove(path);
   }

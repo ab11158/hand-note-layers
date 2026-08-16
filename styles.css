@@ -13,18 +13,33 @@
   border-bottom: 1px solid var(--background-modifier-border);
   display: flex;
   flex: 0 0 auto;
-  gap: 6px;
-  min-height: 52px;
+  gap: 8px;
+  min-height: 56px;
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 7px 10px;
+  padding: 8px 10px;
   scrollbar-width: thin;
+}
+
+.hand-note-toolbar-group {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.hand-note-toolbar-divider {
+  align-self: stretch;
+  background: var(--background-modifier-border);
+  flex: 0 0 1px;
+  margin: 4px 0;
+  width: 1px;
 }
 
 .hand-note-tool {
   flex: 0 0 auto;
-  height: 34px;
-  width: 34px;
+  height: 36px;
+  width: 36px;
 }
 
 .hand-note-tool.is-active {
@@ -37,9 +52,30 @@
   border: 1px solid var(--background-modifier-border);
   border-radius: 4px;
   flex: 0 0 auto;
-  height: 34px;
+  height: 32px;
   padding: 2px;
-  width: 38px;
+  width: 34px;
+}
+
+.hand-note-color-group {
+  gap: 5px;
+}
+
+.hand-note-color-swatch {
+  appearance: none;
+  background: var(--hand-note-swatch);
+  border: 2px solid var(--background-secondary);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--background-modifier-border);
+  flex: 0 0 auto;
+  height: 24px;
+  padding: 0;
+  width: 24px;
+}
+
+.hand-note-color-swatch.is-active {
+  box-shadow: 0 0 0 2px var(--interactive-accent);
+  transform: scale(1.08);
 }
 
 .hand-note-slider {
@@ -47,7 +83,7 @@
   display: flex;
   flex: 0 0 auto;
   gap: 6px;
-  min-width: 120px;
+  min-width: 112px;
 }
 
 .hand-note-slider span {
@@ -58,6 +94,26 @@
 
 .hand-note-slider input {
   min-width: 72px;
+}
+
+.hand-note-slider.is-disabled {
+  opacity: 0.45;
+}
+
+.hand-note-save-status {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  min-width: 42px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.hand-note-save-status[data-status="saving"] {
+  color: var(--text-accent);
+}
+
+.hand-note-save-status[data-status="error"] {
+  color: var(--text-error);
 }
 
 .hand-note-page-input {
@@ -214,6 +270,7 @@
 
 @media (max-width: 600px) {
   .hand-note-toolbar {
+    gap: 6px;
     padding: 6px 8px;
   }
 
@@ -226,6 +283,16 @@
   }
 
   .hand-note-slider {
-    min-width: 108px;
+    min-width: 100px;
+  }
+
+  .hand-note-tool {
+    height: 34px;
+    width: 34px;
+  }
+
+  .hand-note-color-swatch {
+    height: 22px;
+    width: 22px;
   }
 }

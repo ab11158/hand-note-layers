@@ -8,11 +8,15 @@ Hand Note Layers 是一个 Obsidian 插件，用于在 Markdown 和 PDF 文件�
 - 支持 Markdown 文件。
 - 支持 PDF 文件，包含翻页和缩放。
 - 使用手指或 Apple Pencil 书写。
-- 钢笔、颜色、笔宽、橡皮擦。
+- 手形浏览、钢笔、铅笔、荧光笔、整笔橡皮擦。
+- 预设色板、自定义颜色、独立工具粗细和压感笔宽。
 - 撤销、重做、清除当前层。
+- 默认手指滚动、Apple Pencil 书写，可切换为手指书写。
+- 支持标准触控笔侧键/橡皮事件切换绘图工具与橡皮擦。
 - 多个笔记层，层与层之间互不影响。
 - 图层显示、隐藏、重命名、排序和透明度调整。
 - 自动保存到 vault 中的 `.hand-note-layers` 目录。
+- 工具栏显示保存状态，并支持立即保存。
 - 支持桌面端和 iPad 移动端。
 
 ## 在 iPad 上安装
@@ -32,6 +36,10 @@ Hand Note Layers 是一个 Obsidian 插件，用于在 Markdown 和 PDF 文件�
 - 或执行命令 `用 Hand Note Layers 标注当前文件`。
 
 Markdown 文件会进入独立的标注视图。PDF 文件默认会使用 Hand Note Layers 的 PDF 标注视图打开。
+
+Apple Pencil 2 的笔背双击属于 iOS 原生 `UIPencilInteraction`。Obsidian
+社区插件目前无法直接读取该原生回调；插件已支持 Web Pointer Events
+能够提供的触控笔侧键/橡皮事件，并提供 `切换绘图工具与橡皮擦` 命令。
 
 ## 数据存储
 

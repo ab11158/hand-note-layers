@@ -64,6 +64,29 @@ export default class HandNoteLayersPlugin extends Plugin {
         return true;
       }
     });
+
+    this.addCommand({
+      id: "toggle-pen-eraser",
+      name: "切换绘图工具与橡皮擦",
+      checkCallback: (checking) => {
+        const view = this.getActiveAnnotationView();
+        if (!view) {
+          return false;
+        }
+        if (!checking) {
+          view.togglePenAndEraser();
+        }
+        return true;
+      }
+    });
+
+    const handlePencilDoubleTap = () => {
+      this.getActiveAnnotationView()?.togglePenAndEraser();
+    };
+    window.addEventListener("hand-note-pencil-double-tap", handlePencilDoubleTap);
+    this.register(() => {
+      window.removeEventListener("hand-note-pencil-double-tap", handlePencilDoubleTap);
+    });
   }
 
   onunload(): void {
@@ -73,6 +96,13 @@ export default class HandNoteLayersPlugin extends Plugin {
 
   private isSupported(file: TFile): boolean {
     return file.extension === "md" || file.extension === "pdf";
+  }
+
+  private getActiveAnnotationView(): MarkdownAnnotationView | PdfAnnotationView | null {
+    const view = this.app.workspace.activeLeaf?.view;
+    return view instanceof MarkdownAnnotationView || view instanceof PdfAnnotationView
+      ? view
+      : null;
   }
 
   private openAnnotation(file: TFile): void {
