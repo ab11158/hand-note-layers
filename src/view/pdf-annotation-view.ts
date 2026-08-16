@@ -31,7 +31,16 @@ function createWorkerBlobUrl(dataUrl: string): string {
   return URL.createObjectURL(new Blob([bytes], { type: "application/javascript" }));
 }
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = createWorkerBlobUrl(pdfWorkerDataUrl);
+let pdfWorkerBlobUrl: string | null = null;
+
+function ensurePdfWorker(): void {
+  if (pdfWorkerBlobUrl !== null) {
+    return;
+  }
+
+  pdfWorkerBlobUrl = createWorkerBlobUrl(pdfWorkerDataUrl);
+  pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerBlobUrl;
+}
 
 export class PdfAnnotationView extends ItemView {
   private sourceFile: TFile | null = null;
@@ -219,6 +228,7 @@ export class PdfAnnotationView extends ItemView {
       return;
     }
 
+    ensurePdfWorker();
     await this.waitForLayout();
     const data = await this.app.vault.readBinary(this.sourceFile);
     this.pdfDocument = await pdfjsLib.getDocument({

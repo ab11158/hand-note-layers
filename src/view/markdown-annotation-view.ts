@@ -2,6 +2,7 @@ import {
   ItemView,
   MarkdownRenderer,
   TFile,
+  ViewStateResult,
   WorkspaceLeaf
 } from "obsidian";
 import {
@@ -117,7 +118,7 @@ export class MarkdownAnnotationView extends ItemView {
     this.contentEl.empty();
   }
 
-  async setState(state: unknown, result: unknown): Promise<void> {
+  async setState(state: unknown, result: ViewStateResult): Promise<void> {
     await super.setState(state, result);
   }
 

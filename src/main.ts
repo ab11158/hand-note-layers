@@ -20,8 +20,6 @@ export default class HandNoteLayersPlugin extends Plugin {
       (leaf) => new PdfAnnotationView(leaf)
     );
 
-    this.registerExtensions(["pdf"], PDF_ANNOTATION_VIEW_TYPE);
-
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
         if (file instanceof TFile && this.isSupported(file)) {
