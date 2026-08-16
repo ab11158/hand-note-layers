@@ -17,7 +17,7 @@ import {
   saveAnnotation
 } from "../storage/annotation-store";
 import { AnnotationToolbar } from "./annotation-toolbar";
-import { InkCanvas } from "./ink-canvas";
+import { InkCanvas, InkCanvasHistoryState } from "./ink-canvas";
 import { LayerPanel } from "./layer-panel";
 import { createIconButton } from "./ui";
 
@@ -54,6 +54,14 @@ export class PdfAnnotationView extends ItemView {
   private scrollContainer: HTMLDivElement;
   private layerPanel: LayerPanel | null = null;
   private inkCanvases = new Map<number, InkCanvas>();
+  private pageHistories = new Map<number, InkCanvasHistoryState>();
+  private pageElements = new Map<number, HTMLDivElement>();
+  private pageRenderPromises = new Map<number, Promise<void>>();
+  private pageUnloadTimers = new Map<number, number>();
+  private nearbyPages = new Set<number>();
+  private pageObserver: IntersectionObserver | null = null;
+  private pageRenderGeneration = 0;
+  private scrollFrame: number | null = null;
   private currentPage = 1;
   private currentTool: AnnotationTool = "pen";
   private previousDrawingTool: AnnotationTool = "pen";
@@ -132,6 +140,8 @@ export class PdfAnnotationView extends ItemView {
     }
 
     this.sourceFile = file;
+    this.currentPage = 1;
+    this.pageScale = 1;
     this.document = await loadAnnotation(this.app, file);
     this.buildToolbar();
     this.buildPdfSurface();
@@ -156,10 +166,28 @@ export class PdfAnnotationView extends ItemView {
       this.saveTimer = null;
     }
     await this.flushSave();
+    this.pageRenderGeneration += 1;
+    this.pageObserver?.disconnect();
+    this.pageObserver = null;
+    if (this.scrollFrame !== null) {
+      window.cancelAnimationFrame(this.scrollFrame);
+      this.scrollFrame = null;
+    }
+    if (this.scrollContainer) {
+      this.scrollContainer.removeEventListener("scroll", this.handlePdfScroll);
+    }
+    for (const timer of this.pageUnloadTimers.values()) {
+      window.clearTimeout(timer);
+    }
+    this.pageUnloadTimers.clear();
+    this.nearbyPages.clear();
     for (const canvas of this.inkCanvases.values()) {
       canvas.destroy();
     }
     this.inkCanvases.clear();
+    this.pageHistories.clear();
+    this.pageElements.clear();
+    this.pageRenderPromises.clear();
     await this.pdfDocument?.destroy();
     this.pdfDocument = null;
     this.layerPanel = null;
@@ -242,6 +270,9 @@ export class PdfAnnotationView extends ItemView {
     this.pageContainer = document.createElement("div");
     this.pageContainer.className = "hand-note-pdf-pages";
     this.scrollContainer.append(this.pageContainer);
+    this.scrollContainer.addEventListener("scroll", this.handlePdfScroll, {
+      passive: true
+    });
     this.contentEl.append(this.scrollContainer);
   }
 
@@ -264,9 +295,7 @@ export class PdfAnnotationView extends ItemView {
       pageInput.max = String(this.pdfDocument.numPages);
     }
 
-    for (let pageIndex = 1; pageIndex <= this.pdfDocument.numPages; pageIndex += 1) {
-      await this.renderPage(pageIndex);
-    }
+    await this.buildPagePlaceholders();
   }
 
   private waitForLayout(): Promise<void> {
@@ -275,42 +304,115 @@ export class PdfAnnotationView extends ItemView {
     });
   }
 
-  private async renderPage(pageIndex: number): Promise<void> {
-    if (!this.pdfDocument) {
+  private async buildPagePlaceholders(): Promise<void> {
+    const pdfDocument = this.pdfDocument;
+    if (!pdfDocument) {
       return;
     }
 
-    const page = await this.pdfDocument.getPage(pageIndex);
-    const baseViewport = page.getViewport({ scale: 1 });
-    const containerWidth = Math.max(this.pageContainer.clientWidth - 32, 320);
-    const fitScale = containerWidth / baseViewport.width;
-    const viewport = page.getViewport({ scale: fitScale * this.pageScale });
+    const generation = ++this.pageRenderGeneration;
+    this.pageObserver?.disconnect();
+    this.pageObserver = null;
+    for (const timer of this.pageUnloadTimers.values()) {
+      window.clearTimeout(timer);
+    }
+    this.pageUnloadTimers.clear();
+    this.nearbyPages.clear();
+    this.preserveInkCanvasHistories();
+    this.inkCanvases.clear();
+    this.pageElements.clear();
+    this.pageRenderPromises.clear();
+    this.pageContainer.empty();
 
-    const pageEl = document.createElement("div");
-    pageEl.className = "hand-note-pdf-page";
-    pageEl.dataset.page = String(pageIndex);
-    pageEl.style.width = `${viewport.width}px`;
-    pageEl.style.height = `${viewport.height}px`;
+    const containerWidth = Math.max(this.pageContainer.clientWidth - 32, 320);
+    for (let pageIndex = 1; pageIndex <= pdfDocument.numPages; pageIndex += 1) {
+      const page = await pdfDocument.getPage(pageIndex);
+      if (generation !== this.pageRenderGeneration) {
+        return;
+      }
+      const baseViewport = page.getViewport({ scale: 1 });
+      const fitScale = containerWidth / baseViewport.width;
+      const viewport = page.getViewport({ scale: fitScale * this.pageScale });
+      const pageEl = document.createElement("div");
+      pageEl.className = "hand-note-pdf-page";
+      pageEl.dataset.page = String(pageIndex);
+      pageEl.style.width = `${viewport.width}px`;
+      pageEl.style.height = `${viewport.height}px`;
+      this.pageElements.set(pageIndex, pageEl);
+      this.pageContainer.append(pageEl);
+    }
+
+    this.observePageVisibility();
+    await this.renderPageWindow(this.currentPage);
+  }
+
+  private renderPage(pageIndex: number): Promise<void> {
+    const existing = this.pageRenderPromises.get(pageIndex);
+    if (existing) {
+      return existing;
+    }
+
+    const renderPromise = this.renderPageContent(pageIndex).finally(() => {
+      if (this.pageRenderPromises.get(pageIndex) === renderPromise) {
+        this.pageRenderPromises.delete(pageIndex);
+      }
+    });
+    this.pageRenderPromises.set(pageIndex, renderPromise);
+    return renderPromise;
+  }
+
+  private async renderPageContent(pageIndex: number): Promise<void> {
+    const pdfDocument = this.pdfDocument;
+    const pageEl = this.pageElements.get(pageIndex);
+    if (!pdfDocument || !pageEl || this.inkCanvases.has(pageIndex)) {
+      return;
+    }
+
+    const generation = this.pageRenderGeneration;
+    const page = await pdfDocument.getPage(pageIndex);
+    if (generation !== this.pageRenderGeneration) {
+      return;
+    }
+    const baseViewport = page.getViewport({ scale: 1 });
+    const fitScale = pageEl.clientWidth / baseViewport.width;
+    const viewport = page.getViewport({ scale: fitScale });
 
     const renderCanvas = document.createElement("canvas");
     renderCanvas.className = "hand-note-pdf-canvas";
     renderCanvas.style.width = `${viewport.width}px`;
     renderCanvas.style.height = `${viewport.height}px`;
-    renderCanvas.width = Math.round(viewport.width * window.devicePixelRatio);
-    renderCanvas.height = Math.round(viewport.height * window.devicePixelRatio);
+    const preferredRatio = Math.min(Math.max(window.devicePixelRatio || 1, 1), 2);
+    const memoryRatio = Math.sqrt(
+      8_000_000 / Math.max(viewport.width * viewport.height, 1)
+    );
+    const ratio = Math.max(0.5, Math.min(preferredRatio, memoryRatio));
+    renderCanvas.width = Math.max(1, Math.round(viewport.width * ratio));
+    renderCanvas.height = Math.max(1, Math.round(viewport.height * ratio));
 
     const renderContext = renderCanvas.getContext("2d");
     if (renderContext) {
-      const ratio = window.devicePixelRatio || 1;
       renderContext.setTransform(ratio, 0, 0, ratio, 0, 0);
-      await page.render({
-        canvasContext: renderContext,
-        viewport
-      }).promise;
+      try {
+        await page.render({
+          canvasContext: renderContext,
+          viewport
+        }).promise;
+      } catch (error) {
+        if (generation === this.pageRenderGeneration) {
+          console.error(`Hand Note Layers: failed to render PDF page ${pageIndex}`, error);
+        }
+        return;
+      }
     }
 
+    if (
+      generation !== this.pageRenderGeneration ||
+      this.pageElements.get(pageIndex) !== pageEl
+    ) {
+      return;
+    }
+    pageEl.empty();
     pageEl.append(renderCanvas);
-    this.pageContainer.append(pageEl);
 
     const inkCanvas = new InkCanvas({
       getDocument: () => this.document as AnnotationDocument,
@@ -320,13 +422,23 @@ export class PdfAnnotationView extends ItemView {
       getEraserSize: () => this.toolSizes.eraser,
       getPressureEnabled: () => this.pressureEnabled,
       getFingerDrawingEnabled: () => this.fingerDrawingEnabled,
-      onDocumentChange: (next) => this.handleDocumentChange(next),
-      onInteraction: () => undefined,
+      onDocumentChange: (next, renderCanvas) =>
+        this.handleDocumentChange(next, renderCanvas),
+      onInteraction: (type) => {
+        if (type === "stroke-start") {
+          this.cancelScheduledSave();
+        }
+      },
       onPencilShortcut: () => this.togglePenAndEraser(),
       pageIndex
     });
+    const history = this.pageHistories.get(pageIndex);
+    if (history) {
+      inkCanvas.restoreHistoryState(history);
+    }
     this.inkCanvases.set(pageIndex, inkCanvas);
     pageEl.append(inkCanvas.canvas);
+    inkCanvas.render();
   }
 
   private currentInkCanvas(): InkCanvas | null {
@@ -336,38 +448,131 @@ export class PdfAnnotationView extends ItemView {
   private goToPage(page: number): void {
     const pageCount = this.pdfDocument?.numPages ?? 1;
     const next = Math.max(1, Math.min(pageCount, page));
-    this.currentPage = next;
 
-    const target = this.pageContainer.querySelector(
-      `.hand-note-pdf-page[data-page="${next}"]`
-    );
-    const pageInput = this.toolbar.querySelector(
-      ".hand-note-page-input"
-    ) as HTMLInputElement | null;
-    if (pageInput) {
-      pageInput.value = String(next);
-    }
+    const target = this.pageElements.get(next);
+    this.updateCurrentPage(next);
+    void this.renderPageWindow(next);
     target?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   private zoom(delta: number): void {
     this.pageScale = Math.max(0.5, Math.min(2.5, this.pageScale + delta));
-    for (const canvas of this.inkCanvases.values()) {
-      canvas.destroy();
-    }
-    this.inkCanvases.clear();
-    this.pageContainer.empty();
     if (this.pdfDocument) {
-      void this.renderAllPages();
+      void this.buildPagePlaceholders().then(() => {
+        this.pageElements.get(this.currentPage)?.scrollIntoView({ block: "start" });
+      });
     }
   }
 
-  private async renderAllPages(): Promise<void> {
-    if (!this.pdfDocument) {
+  private async renderPageWindow(pageIndex: number): Promise<void> {
+    const pageCount = this.pdfDocument?.numPages ?? 0;
+    const pages = [pageIndex, pageIndex - 1, pageIndex + 1].filter(
+      (page) => page >= 1 && page <= pageCount
+    );
+    await Promise.all(pages.map((page) => this.renderPage(page)));
+  }
+
+  private observePageVisibility(): void {
+    if (typeof IntersectionObserver === "undefined") {
       return;
     }
-    for (let pageIndex = 1; pageIndex <= this.pdfDocument.numPages; pageIndex += 1) {
-      await this.renderPage(pageIndex);
+
+    this.pageObserver = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          const pageIndex = Number((entry.target as HTMLElement).dataset.page);
+          if (!Number.isFinite(pageIndex)) {
+            continue;
+          }
+          if (entry.isIntersecting) {
+            this.nearbyPages.add(pageIndex);
+            const unloadTimer = this.pageUnloadTimers.get(pageIndex);
+            if (unloadTimer !== undefined) {
+              window.clearTimeout(unloadTimer);
+              this.pageUnloadTimers.delete(pageIndex);
+            }
+            void this.renderPage(pageIndex);
+          } else {
+            this.nearbyPages.delete(pageIndex);
+            this.schedulePageUnload(pageIndex);
+          }
+        }
+      },
+      {
+        root: this.scrollContainer,
+        rootMargin: "100% 0px",
+        threshold: 0
+      }
+    );
+
+    for (const pageEl of this.pageElements.values()) {
+      this.pageObserver.observe(pageEl);
+    }
+  }
+
+  private schedulePageUnload(pageIndex: number): void {
+    if (!this.inkCanvases.has(pageIndex) || this.pageUnloadTimers.has(pageIndex)) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      this.pageUnloadTimers.delete(pageIndex);
+      if (this.nearbyPages.has(pageIndex) || pageIndex === this.currentPage) {
+        return;
+      }
+      if (this.pageRenderPromises.has(pageIndex)) {
+        this.schedulePageUnload(pageIndex);
+        return;
+      }
+      const inkCanvas = this.inkCanvases.get(pageIndex);
+      if (inkCanvas) {
+        this.pageHistories.set(pageIndex, inkCanvas.getHistoryState());
+        inkCanvas.destroy();
+      }
+      this.inkCanvases.delete(pageIndex);
+      this.pageElements.get(pageIndex)?.empty();
+    }, 1200);
+    this.pageUnloadTimers.set(pageIndex, timer);
+  }
+
+  private handlePdfScroll = (): void => {
+    if (this.scrollFrame !== null) {
+      return;
+    }
+    this.scrollFrame = window.requestAnimationFrame(() => {
+      this.scrollFrame = null;
+      const containerRect = this.scrollContainer.getBoundingClientRect();
+      const center = containerRect.top + containerRect.height / 2;
+      let closestPage = this.currentPage;
+      let closestDistance = Number.POSITIVE_INFINITY;
+      for (const [pageIndex, pageEl] of this.pageElements) {
+        const rect = pageEl.getBoundingClientRect();
+        const distance = Math.abs(rect.top + rect.height / 2 - center);
+        if (distance < closestDistance) {
+          closestDistance = distance;
+          closestPage = pageIndex;
+        }
+      }
+      if (closestPage !== this.currentPage) {
+        this.updateCurrentPage(closestPage);
+        void this.renderPageWindow(closestPage);
+      }
+    });
+  };
+
+  private updateCurrentPage(pageIndex: number): void {
+    this.currentPage = pageIndex;
+    const pageInput = this.toolbar.querySelector(
+      ".hand-note-page-input"
+    ) as HTMLInputElement | null;
+    if (pageInput) {
+      pageInput.value = String(pageIndex);
+    }
+  }
+
+  private preserveInkCanvasHistories(): void {
+    for (const [pageIndex, inkCanvas] of this.inkCanvases) {
+      this.pageHistories.set(pageIndex, inkCanvas.getHistoryState());
+      inkCanvas.destroy();
     }
   }
 
@@ -404,24 +609,34 @@ export class PdfAnnotationView extends ItemView {
     );
   }
 
-  private handleDocumentChange(document: AnnotationDocument): void {
+  private handleDocumentChange(
+    document: AnnotationDocument,
+    renderCanvases = true
+  ): void {
     this.document = document;
     this.layerPanel?.setDocument(document);
-    for (const inkCanvas of this.inkCanvases.values()) {
-      inkCanvas.render();
+    if (renderCanvases) {
+      for (const inkCanvas of this.inkCanvases.values()) {
+        inkCanvas.render();
+      }
     }
     this.scheduleSave();
   }
 
   private scheduleSave(): void {
-    if (this.saveTimer !== null) {
-      window.clearTimeout(this.saveTimer);
-    }
+    this.cancelScheduledSave();
     this.annotationToolbar?.setSaveStatus("saving");
     this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;
       void this.flushSave();
     }, 350);
+  }
+
+  private cancelScheduledSave(): void {
+    if (this.saveTimer !== null) {
+      window.clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
   }
 
   private async flushSave(): Promise<void> {

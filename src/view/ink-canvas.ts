@@ -4,7 +4,6 @@ import {
   AnnotationStroke,
   AnnotationTool,
   StrokePoint,
-  cloneDocument,
   generateId,
   getActiveLayer
 } from "../model/annotation";
@@ -17,13 +16,21 @@ export interface InkCanvasOptions {
   getEraserSize: () => number;
   getPressureEnabled: () => boolean;
   getFingerDrawingEnabled: () => boolean;
-  onDocumentChange: (document: AnnotationDocument) => void;
+  onDocumentChange: (document: AnnotationDocument, renderCanvas?: boolean) => void;
   onInteraction?: (type: "stroke-start" | "stroke-end" | "erase") => void;
   onPencilShortcut?: () => void;
   pageIndex?: number;
 }
 
+export interface InkCanvasHistoryState {
+  undoStack: AnnotationDocument[];
+  redoStack: AnnotationDocument[];
+}
+
 export class InkCanvas {
+  private static readonly MAX_CANVAS_PIXELS = 12_000_000;
+  private static readonly MAX_CANVAS_DIMENSION = 16_384;
+
   readonly canvas: HTMLCanvasElement;
   private readonly context: CanvasRenderingContext2D;
   private readonly options: InkCanvasOptions;
@@ -34,6 +41,17 @@ export class InkCanvas {
   private undoStack: AnnotationDocument[] = [];
   private redoStack: AnnotationDocument[] = [];
   private observer: ResizeObserver | null = null;
+  private interactionFrame: number | null = null;
+  private resizeFrame: number | null = null;
+  private activeRect: DOMRect | null = null;
+  private renderedPointCount = 0;
+  private pendingEraserPoints: StrokePoint[] = [];
+  private readonly strokeBounds = new WeakMap<AnnotationStroke, {
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+  }>();
 
   constructor(options: InkCanvasOptions) {
     this.options = options;
@@ -58,7 +76,7 @@ export class InkCanvas {
     this.updateInputMode();
 
     if (typeof ResizeObserver !== "undefined") {
-      this.observer = new ResizeObserver(() => this.render());
+      this.observer = new ResizeObserver(() => this.scheduleResizeRender());
       this.observer.observe(this.canvas);
     }
 
@@ -71,6 +89,12 @@ export class InkCanvas {
     this.canvas.removeEventListener("pointerup", this.handlePointerUp);
     this.canvas.removeEventListener("pointercancel", this.handlePointerUp);
     this.observer?.disconnect();
+    if (this.interactionFrame !== null) {
+      window.cancelAnimationFrame(this.interactionFrame);
+    }
+    if (this.resizeFrame !== null) {
+      window.cancelAnimationFrame(this.resizeFrame);
+    }
   }
 
   setDocument(_document: AnnotationDocument): void {
@@ -78,6 +102,9 @@ export class InkCanvas {
     this.activePointerId = null;
     this.activeTool = null;
     this.eraserChanged = false;
+    this.activeRect = null;
+    this.renderedPointCount = 0;
+    this.pendingEraserPoints = [];
     this.resetHistory();
     this.render();
   }
@@ -96,6 +123,18 @@ export class InkCanvas {
     this.redoStack = [];
   }
 
+  getHistoryState(): InkCanvasHistoryState {
+    return {
+      undoStack: this.undoStack.slice(),
+      redoStack: this.redoStack.slice()
+    };
+  }
+
+  restoreHistoryState(state: InkCanvasHistoryState): void {
+    this.undoStack = state.undoStack.slice();
+    this.redoStack = state.redoStack.slice();
+  }
+
   undo(): void {
     const previous = this.undoStack.pop();
     if (!previous) {
@@ -106,7 +145,7 @@ export class InkCanvas {
     this.activePointerId = null;
     this.activeTool = null;
     this.eraserChanged = false;
-    this.redoStack.push(cloneDocument(this.options.getDocument()));
+    this.redoStack.push(this.snapshotDocument(this.options.getDocument()));
     this.options.onDocumentChange(previous);
   }
 
@@ -120,7 +159,7 @@ export class InkCanvas {
     this.activePointerId = null;
     this.activeTool = null;
     this.eraserChanged = false;
-    this.undoStack.push(cloneDocument(this.options.getDocument()));
+    this.undoStack.push(this.snapshotDocument(this.options.getDocument()));
     this.options.onDocumentChange(next);
   }
 
@@ -148,9 +187,9 @@ export class InkCanvas {
       return;
     }
 
-    const pixelRatio = Math.max(window.devicePixelRatio || 1, 1);
-    const width = Math.round(rect.width * pixelRatio);
-    const height = Math.round(rect.height * pixelRatio);
+    const pixelRatio = this.canvasPixelRatio(rect.width, rect.height);
+    const width = Math.max(1, Math.round(rect.width * pixelRatio));
+    const height = Math.max(1, Math.round(rect.height * pixelRatio));
 
     if (canvas.width !== width || canvas.height !== height) {
       canvas.width = width;
@@ -176,6 +215,7 @@ export class InkCanvas {
     }
 
     this.context.globalAlpha = 1;
+    this.renderedPointCount = this.activeStroke?.points.length ?? 0;
   }
 
   private drawStroke(
@@ -205,10 +245,10 @@ export class InkCanvas {
 
     const points = stroke.points;
     if (points.length === 1) {
-      const point = this.normalizePoint(points[0], width, height);
+      const point = points[0];
       context.lineWidth = this.pressureWidth(stroke, points[0].pressure);
       context.beginPath();
-      context.arc(point.x, point.y, context.lineWidth / 2, 0, Math.PI * 2);
+      context.arc(point.x * width, point.y * height, context.lineWidth / 2, 0, Math.PI * 2);
       context.fillStyle = stroke.color;
       context.fill();
       context.restore();
@@ -216,30 +256,25 @@ export class InkCanvas {
     }
 
     context.beginPath();
-    const first = this.normalizePoint(points[0], width, height);
-    context.moveTo(first.x, first.y);
+    context.moveTo(points[0].x * width, points[0].y * height);
 
     for (let index = 1; index < points.length; index += 1) {
-      const previous = this.normalizePoint(points[index - 1], width, height);
-      const current = this.normalizePoint(points[index], width, height);
-      const middleX = (previous.x + current.x) / 2;
-      const middleY = (previous.y + current.y) / 2;
+      const previous = points[index - 1];
+      const current = points[index];
+      const previousX = previous.x * width;
+      const previousY = previous.y * height;
+      const currentX = current.x * width;
+      const currentY = current.y * height;
+      const middleX = (previousX + currentX) / 2;
+      const middleY = (previousY + currentY) / 2;
       context.lineWidth = this.pressureWidth(stroke, current.pressure);
-      context.quadraticCurveTo(previous.x, previous.y, middleX, middleY);
+      context.quadraticCurveTo(previousX, previousY, middleX, middleY);
     }
 
-    const last = this.normalizePoint(points[points.length - 1], width, height);
-    context.lineTo(last.x, last.y);
+    const last = points[points.length - 1];
+    context.lineTo(last.x * width, last.y * height);
     context.stroke();
     context.restore();
-  }
-
-  private normalizePoint(point: StrokePoint, width: number, height: number): StrokePoint {
-    return {
-      x: point.x * width,
-      y: point.y * height,
-      pressure: point.pressure
-    };
   }
 
   private pressureWidth(stroke: AnnotationStroke, pressure: number): number {
@@ -290,15 +325,17 @@ export class InkCanvas {
     this.canvas.setPointerCapture(event.pointerId);
     this.activePointerId = event.pointerId;
     this.activeTool = tool;
+    this.activeRect = this.canvas.getBoundingClientRect();
+    this.ensureCanvasReady(this.activeRect);
+    this.renderedPointCount = 0;
+    this.pendingEraserPoints = [];
 
-    const point = this.pointFromEvent(event);
+    const point = this.pointFromEvent(event, this.activeRect);
 
     if (tool === "eraser") {
       this.pushHistory(document);
-      this.eraserChanged = this.eraseAtPoint(layer, point);
-      if (this.eraserChanged) {
-        this.render();
-      }
+      this.pendingEraserPoints.push(point);
+      this.scheduleInteractionFrame();
       return;
     }
 
@@ -313,9 +350,8 @@ export class InkCanvas {
       pageIndex: this.options.pageIndex
     };
     layer.strokes.push(this.activeStroke);
-    this.options.onDocumentChange(document);
     this.options.onInteraction?.("stroke-start");
-    this.render();
+    this.flushInteractionFrame();
   };
 
   private handlePointerMove = (event: PointerEvent): void => {
@@ -324,14 +360,9 @@ export class InkCanvas {
     }
 
     event.preventDefault();
-    const point = this.pointFromEvent(event);
-
     if (this.activeTool === "eraser") {
-      const layer = getActiveLayer(this.options.getDocument());
-      if (layer && this.eraseAtPoint(layer, point)) {
-        this.eraserChanged = true;
-        this.render();
-      }
+      this.collectEraserPoints(event);
+      this.scheduleInteractionFrame();
       return;
     }
 
@@ -339,14 +370,23 @@ export class InkCanvas {
       return;
     }
 
-    this.activeStroke.points.push(point);
-    this.render();
+    this.collectStrokePoints(event);
+    this.scheduleInteractionFrame();
   };
 
   private handlePointerUp = (event: PointerEvent): void => {
     if (event.pointerId !== this.activePointerId) {
       return;
     }
+
+    event.preventDefault();
+
+    if (this.activeTool === "eraser") {
+      this.collectEraserPoints(event);
+    } else if (this.activeStroke) {
+      this.collectStrokePoints(event, true);
+    }
+    this.flushPendingInteraction();
 
     if (this.canvas.hasPointerCapture(event.pointerId)) {
       this.canvas.releasePointerCapture(event.pointerId);
@@ -355,21 +395,23 @@ export class InkCanvas {
     if (this.activeTool === "eraser") {
       if (this.eraserChanged) {
         this.options.onInteraction?.("erase");
-        this.options.onDocumentChange(this.options.getDocument());
+        this.options.onDocumentChange(this.options.getDocument(), false);
       } else {
         this.undoStack.pop();
       }
       this.eraserChanged = false;
-      this.render();
     } else if (this.activeStroke) {
       this.activeStroke = null;
       this.options.onInteraction?.("stroke-end");
-      this.options.onDocumentChange(this.options.getDocument());
-      this.render();
+      const document = this.options.getDocument();
+      this.options.onDocumentChange(document, this.needsLayerOrderRefresh(document));
     }
 
     this.activePointerId = null;
     this.activeTool = null;
+    this.activeRect = null;
+    this.renderedPointCount = 0;
+    this.pendingEraserPoints = [];
   };
 
   private eraseAtPoint(layer: AnnotationLayer, point: StrokePoint): boolean {
@@ -378,6 +420,12 @@ export class InkCanvas {
 
     for (let index = layer.strokes.length - 1; index >= 0; index -= 1) {
       const stroke = layer.strokes[index];
+      if (
+        this.options.pageIndex !== undefined &&
+        stroke.pageIndex !== this.options.pageIndex
+      ) {
+        continue;
+      }
       if (this.strokeHitTest(stroke, point, eraserRadius)) {
         layer.strokes.splice(index, 1);
         removed = true;
@@ -395,66 +443,76 @@ export class InkCanvas {
   }
 
   private strokeHitTest(stroke: AnnotationStroke, point: StrokePoint, radius: number): boolean {
-    const rect = this.canvas.getBoundingClientRect();
-    const pixelPoint: StrokePoint = {
-      x: point.x * rect.width,
-      y: point.y * rect.height,
-      pressure: point.pressure
-    };
+    const rect = this.activeRect ?? this.canvas.getBoundingClientRect();
+    const bounds = this.getStrokeBounds(stroke);
+    const radiusX = rect.width > 0 ? radius / rect.width : 0;
+    const radiusY = rect.height > 0 ? radius / rect.height : 0;
+    if (
+      point.x < bounds.minX - radiusX ||
+      point.x > bounds.maxX + radiusX ||
+      point.y < bounds.minY - radiusY ||
+      point.y > bounds.maxY + radiusY
+    ) {
+      return false;
+    }
+
+    const pixelX = point.x * rect.width;
+    const pixelY = point.y * rect.height;
 
     for (let index = 1; index < stroke.points.length; index += 1) {
-      const start: StrokePoint = {
-        x: stroke.points[index - 1].x * rect.width,
-        y: stroke.points[index - 1].y * rect.height,
-        pressure: stroke.points[index - 1].pressure
-      };
-      const end: StrokePoint = {
-        x: stroke.points[index].x * rect.width,
-        y: stroke.points[index].y * rect.height,
-        pressure: stroke.points[index].pressure
-      };
-      const distance = this.distanceToSegment(pixelPoint, start, end);
+      const start = stroke.points[index - 1];
+      const end = stroke.points[index];
+      const distance = this.distanceToSegment(
+        pixelX,
+        pixelY,
+        start.x * rect.width,
+        start.y * rect.height,
+        end.x * rect.width,
+        end.y * rect.height
+      );
       if (distance <= radius) {
         return true;
       }
     }
 
     if (stroke.points.length === 1) {
-      const start: StrokePoint = {
-        x: stroke.points[0].x * rect.width,
-        y: stroke.points[0].y * rect.height,
-        pressure: stroke.points[0].pressure
-      };
-      const dx = pixelPoint.x - start.x;
-      const dy = pixelPoint.y - start.y;
+      const start = stroke.points[0];
+      const dx = pixelX - start.x * rect.width;
+      const dy = pixelY - start.y * rect.height;
       return Math.sqrt(dx * dx + dy * dy) <= radius;
     }
 
     return false;
   }
 
-  private distanceToSegment(point: StrokePoint, start: StrokePoint, end: StrokePoint): number {
-    const dx = end.x - start.x;
-    const dy = end.y - start.y;
+  private distanceToSegment(
+    pointX: number,
+    pointY: number,
+    startX: number,
+    startY: number,
+    endX: number,
+    endY: number
+  ): number {
+    const dx = endX - startX;
+    const dy = endY - startY;
     const lengthSquared = dx * dx + dy * dy;
 
     if (lengthSquared === 0) {
-      const px = point.x - start.x;
-      const py = point.y - start.y;
+      const px = pointX - startX;
+      const py = pointY - startY;
       return Math.sqrt(px * px + py * py);
     }
 
-    let ratio = ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared;
+    let ratio = ((pointX - startX) * dx + (pointY - startY) * dy) / lengthSquared;
     ratio = Math.max(0, Math.min(1, ratio));
-    const closestX = start.x + ratio * dx;
-    const closestY = start.y + ratio * dy;
-    const offsetX = point.x - closestX;
-    const offsetY = point.y - closestY;
+    const closestX = startX + ratio * dx;
+    const closestY = startY + ratio * dy;
+    const offsetX = pointX - closestX;
+    const offsetY = pointY - closestY;
     return Math.sqrt(offsetX * offsetX + offsetY * offsetY);
   }
 
-  private pointFromEvent(event: PointerEvent): StrokePoint {
-    const rect = this.canvas.getBoundingClientRect();
+  private pointFromEvent(event: PointerEvent, rect = this.canvas.getBoundingClientRect()): StrokePoint {
     const x = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 0;
     const y = rect.height > 0 ? (event.clientY - rect.top) / rect.height : 0;
 
@@ -466,10 +524,251 @@ export class InkCanvas {
   }
 
   private pushHistory(document: AnnotationDocument): void {
-    this.undoStack.push(cloneDocument(document));
+    this.undoStack.push(this.snapshotDocument(document));
     if (this.undoStack.length > 100) {
       this.undoStack.shift();
     }
     this.redoStack = [];
+  }
+
+  private snapshotDocument(document: AnnotationDocument): AnnotationDocument {
+    return {
+      ...document,
+      layers: document.layers.map((layer) => ({
+        ...layer,
+        strokes: layer.strokes.slice()
+      }))
+    };
+  }
+
+  private canvasPixelRatio(width: number, height: number): number {
+    const preferred = Math.min(Math.max(window.devicePixelRatio || 1, 1), 2);
+    const areaLimit = Math.sqrt(
+      InkCanvas.MAX_CANVAS_PIXELS / Math.max(width * height, 1)
+    );
+    const dimensionLimit =
+      InkCanvas.MAX_CANVAS_DIMENSION / Math.max(width, height, 1);
+    return Math.max(0.1, Math.min(preferred, areaLimit, dimensionLimit));
+  }
+
+  private scheduleResizeRender(): void {
+    if (this.resizeFrame !== null) {
+      return;
+    }
+    this.resizeFrame = window.requestAnimationFrame(() => {
+      this.resizeFrame = null;
+      this.render();
+    });
+  }
+
+  private scheduleInteractionFrame(): void {
+    if (this.interactionFrame !== null) {
+      return;
+    }
+    this.interactionFrame = window.requestAnimationFrame(() => {
+      this.interactionFrame = null;
+      this.flushInteractionFrame();
+    });
+  }
+
+  private flushPendingInteraction(): void {
+    if (this.interactionFrame !== null) {
+      window.cancelAnimationFrame(this.interactionFrame);
+      this.interactionFrame = null;
+    }
+    this.flushInteractionFrame();
+  }
+
+  private flushInteractionFrame(): void {
+    if (this.activeTool === "eraser") {
+      const layer = getActiveLayer(this.options.getDocument());
+      let changed = false;
+      for (const point of this.pendingEraserPoints) {
+        changed = this.eraseAtPoint(layer, point) || changed;
+      }
+      this.pendingEraserPoints = [];
+      if (changed) {
+        this.eraserChanged = true;
+        this.render();
+      }
+      return;
+    }
+
+    if (!this.activeStroke || this.renderedPointCount >= this.activeStroke.points.length) {
+      return;
+    }
+
+    const rect = this.activeRect ?? this.canvas.getBoundingClientRect();
+    this.drawStrokeIncrement(
+      this.activeStroke,
+      this.renderedPointCount,
+      rect.width,
+      rect.height,
+      getActiveLayer(this.options.getDocument()).opacity
+    );
+    this.renderedPointCount = this.activeStroke.points.length;
+  }
+
+  private drawStrokeIncrement(
+    stroke: AnnotationStroke,
+    fromIndex: number,
+    width: number,
+    height: number,
+    layerOpacity: number
+  ): void {
+    const points = stroke.points;
+    if (points.length === 0 || width <= 0 || height <= 0) {
+      return;
+    }
+
+    const context = this.context;
+    context.save();
+    context.globalAlpha = layerOpacity * (stroke.opacity ?? this.defaultOpacity(stroke.tool));
+    context.globalCompositeOperation =
+      stroke.tool === "highlighter" ? "multiply" : "source-over";
+    context.lineCap = stroke.tool === "highlighter" ? "butt" : "round";
+    context.lineJoin = "round";
+    context.strokeStyle = stroke.color;
+    context.fillStyle = stroke.color;
+
+    if (fromIndex === 0) {
+      const first = points[0];
+      const radius = this.pressureWidth(stroke, first.pressure) / 2;
+      context.beginPath();
+      if (stroke.tool === "highlighter") {
+        context.fillRect(first.x * width - radius, first.y * height - radius, radius * 2, radius * 2);
+      } else {
+        context.arc(first.x * width, first.y * height, radius, 0, Math.PI * 2);
+        context.fill();
+      }
+    }
+
+    for (let index = Math.max(1, fromIndex); index < points.length; index += 1) {
+      const previous = points[index - 1];
+      const current = points[index];
+      context.lineWidth =
+        (this.pressureWidth(stroke, previous.pressure) +
+          this.pressureWidth(stroke, current.pressure)) /
+        2;
+      context.beginPath();
+      context.moveTo(previous.x * width, previous.y * height);
+      context.lineTo(current.x * width, current.y * height);
+      context.stroke();
+    }
+    context.restore();
+  }
+
+  private collectStrokePoints(event: PointerEvent, forceLastPoint = false): void {
+    if (!this.activeStroke || !this.activeRect) {
+      return;
+    }
+
+    const samples = this.coalescedEvents(event);
+    for (let index = 0; index < samples.length; index += 1) {
+      const force = forceLastPoint && index === samples.length - 1;
+      const point = this.pointFromEvent(samples[index], this.activeRect);
+      if (force && samples[index].pressure === 0) {
+        point.pressure =
+          this.activeStroke.points[this.activeStroke.points.length - 1].pressure;
+      }
+      this.appendStrokePoint(point, force);
+    }
+  }
+
+  private appendStrokePoint(point: StrokePoint, force: boolean): void {
+    if (!this.activeStroke || !this.activeRect) {
+      return;
+    }
+
+    const last = this.activeStroke.points[this.activeStroke.points.length - 1];
+    const dx = (point.x - last.x) * this.activeRect.width;
+    const dy = (point.y - last.y) * this.activeRect.height;
+    const distanceSquared = dx * dx + dy * dy;
+    const pressureChanged = Math.abs(point.pressure - last.pressure) >= 0.025;
+    if (!force && distanceSquared < 0.25 && !pressureChanged) {
+      return;
+    }
+    if (force && distanceSquared < 0.01 && !pressureChanged) {
+      return;
+    }
+    this.activeStroke.points.push(point);
+  }
+
+  private collectEraserPoints(event: PointerEvent): void {
+    if (!this.activeRect) {
+      return;
+    }
+
+    for (const sample of this.coalescedEvents(event)) {
+      const point = this.pointFromEvent(sample, this.activeRect);
+      const last = this.pendingEraserPoints[this.pendingEraserPoints.length - 1];
+      if (last) {
+        const dx = (point.x - last.x) * this.activeRect.width;
+        const dy = (point.y - last.y) * this.activeRect.height;
+        if (dx * dx + dy * dy < 4) {
+          continue;
+        }
+      }
+      this.pendingEraserPoints.push(point);
+    }
+  }
+
+  private coalescedEvents(event: PointerEvent): PointerEvent[] {
+    const samples = event.getCoalescedEvents?.();
+    return samples && samples.length > 0 ? samples : [event];
+  }
+
+  private ensureCanvasReady(rect: DOMRect): void {
+    const pixelRatio = this.canvasPixelRatio(rect.width, rect.height);
+    const width = Math.max(1, Math.round(rect.width * pixelRatio));
+    const height = Math.max(1, Math.round(rect.height * pixelRatio));
+    if (this.canvas.width !== width || this.canvas.height !== height) {
+      this.render();
+    }
+  }
+
+  private needsLayerOrderRefresh(document: AnnotationDocument): boolean {
+    const activeLayerIndex = document.layers.findIndex(
+      (layer) => layer.id === document.activeLayerId
+    );
+    if (activeLayerIndex < 0) {
+      return false;
+    }
+    return document.layers.slice(activeLayerIndex + 1).some(
+      (layer) =>
+        layer.visible &&
+        layer.opacity > 0 &&
+        layer.strokes.some(
+          (stroke) =>
+            this.options.pageIndex === undefined ||
+            stroke.pageIndex === this.options.pageIndex
+        )
+    );
+  }
+
+  private getStrokeBounds(stroke: AnnotationStroke): {
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+  } {
+    const cached = this.strokeBounds.get(stroke);
+    if (cached) {
+      return cached;
+    }
+
+    let minX = 1;
+    let minY = 1;
+    let maxX = 0;
+    let maxY = 0;
+    for (const point of stroke.points) {
+      minX = Math.min(minX, point.x);
+      minY = Math.min(minY, point.y);
+      maxX = Math.max(maxX, point.x);
+      maxY = Math.max(maxY, point.y);
+    }
+    const bounds = { minX, minY, maxX, maxY };
+    this.strokeBounds.set(stroke, bounds);
+    return bounds;
   }
 }

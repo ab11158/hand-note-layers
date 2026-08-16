@@ -136,8 +136,13 @@ export class MarkdownAnnotationView extends ItemView {
       getEraserSize: () => this.toolSizes.eraser,
       getPressureEnabled: () => this.pressureEnabled,
       getFingerDrawingEnabled: () => this.fingerDrawingEnabled,
-      onDocumentChange: (next) => this.handleDocumentChange(next),
-      onInteraction: () => undefined,
+      onDocumentChange: (next, renderCanvas) =>
+        this.handleDocumentChange(next, renderCanvas),
+      onInteraction: (type) => {
+        if (type === "stroke-start") {
+          this.cancelScheduledSave();
+        }
+      },
       onPencilShortcut: () => this.togglePenAndEraser()
     });
     this.surface.append(this.inkCanvas.canvas);
@@ -252,23 +257,33 @@ export class MarkdownAnnotationView extends ItemView {
     );
   }
 
-  private handleDocumentChange(document: AnnotationDocument): void {
+  private handleDocumentChange(
+    document: AnnotationDocument,
+    renderCanvas = true
+  ): void {
     this.document = document;
     this.layerPanel?.setDocument(document);
-    this.inkCanvas?.render();
+    if (renderCanvas) {
+      this.inkCanvas?.render();
+    }
     this.scheduleSave();
   }
 
   private scheduleSave(): void {
-    if (this.saveTimer !== null) {
-      window.clearTimeout(this.saveTimer);
-    }
+    this.cancelScheduledSave();
 
     this.annotationToolbar?.setSaveStatus("saving");
     this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;
       void this.flushSave();
     }, 350);
+  }
+
+  private cancelScheduledSave(): void {
+    if (this.saveTimer !== null) {
+      window.clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
   }
 
   private async flushSave(): Promise<void> {

@@ -165,6 +165,7 @@
 .hand-note-pdf-page {
   background: white;
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
+  contain: layout paint size;
   flex: 0 0 auto;
   position: relative;
 }
