@@ -1,0 +1,29 @@
+{
+  "name": "hand-note-layers",
+  "version": "0.1.0",
+  "description": "Layer-based handwriting annotations for Markdown and PDF files in Obsidian.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "obsidian",
+    "plugin",
+    "annotation",
+    "handwriting",
+    "ipad"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.5",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.20.2",
+    "obsidian": "^1.7.2",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^4.10.38"
+  }
+}

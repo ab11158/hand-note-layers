@@ -1,0 +1,10 @@
+{
+  "id": "hand-note-layers",
+  "name": "Hand Note Layers",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "Layer-based handwriting annotations for Markdown and PDF files in Obsidian.",
+  "author": "jepicaju862",
+  "authorUrl": "https://github.com/jepicaju862-lab",
+  "isDesktopOnly": false
+}

@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "Node",
+    "lib": [
+      "DOM",
+      "ES2020"
+    ],
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "strict": false,
+    "noEmit": true,
+    "types": [
+      "node"
+    ]
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.d.ts"
+  ]
+}
