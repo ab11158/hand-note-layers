@@ -1,6 +1,7 @@
 import {
   ItemView,
   TFile,
+  ViewStateResult,
   WorkspaceLeaf
 } from "obsidian";
 import * as pdfjsLib from "pdfjs-dist";
@@ -79,22 +80,51 @@ export class PdfAnnotationView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
+    this.contentEl.classList.add("hand-note-view", "hand-note-pdf-view");
+  }
+
+  async onClose(): Promise<void> {
+    await this.releaseCurrentFile();
+    this.contentEl.empty();
+  }
+
+  getState(): Record<string, unknown> {
+    return this.sourceFile ? { file: this.sourceFile.path } : {};
+  }
+
+  async setState(state: unknown, result: ViewStateResult): Promise<void> {
+    await super.setState(state, result);
+    const filePath = this.readFilePath(state);
+    await this.openFile(filePath);
+  }
+
+  private readFilePath(state: unknown): string | null {
+    if (typeof state !== "object" || state === null || !("file" in state)) {
+      return null;
+    }
+
+    const file = (state as { file?: unknown }).file;
+    return typeof file === "string" ? file : null;
+  }
+
+  private async openFile(filePath: string | null): Promise<void> {
+    await this.releaseCurrentFile();
     this.contentEl.empty();
     this.contentEl.classList.add("hand-note-view", "hand-note-pdf-view");
 
-    const state = this.getState() as { file?: string } | undefined;
-    if (!state?.file) {
+    if (!filePath) {
       this.contentEl.createEl("p", { text: "没有可标注的 PDF 文件。" });
       return;
     }
 
-    this.sourceFile = this.app.vault.getAbstractFileByPath(state.file) as TFile | null;
-    if (!this.sourceFile) {
+    const file = this.app.vault.getAbstractFileByPath(filePath);
+    if (!(file instanceof TFile) || file.extension !== "pdf") {
       this.contentEl.createEl("p", { text: "无法找到源文件。" });
       return;
     }
 
-    this.document = await loadAnnotation(this.app, this.sourceFile);
+    this.sourceFile = file;
+    this.document = await loadAnnotation(this.app, file);
     this.buildToolbar();
     this.buildPdfSurface();
     this.layerPanel = new LayerPanel(this.document, {
@@ -112,9 +142,10 @@ export class PdfAnnotationView extends ItemView {
     await this.loadPdf();
   }
 
-  async onClose(): Promise<void> {
+  private async releaseCurrentFile(): Promise<void> {
     if (this.saveTimer !== null) {
       window.clearTimeout(this.saveTimer);
+      this.saveTimer = null;
     }
     if (this.sourceFile && this.document) {
       await saveAnnotation(this.app, this.sourceFile, this.document);
@@ -123,8 +154,11 @@ export class PdfAnnotationView extends ItemView {
       canvas.destroy();
     }
     this.inkCanvases.clear();
-    this.pdfDocument?.destroy();
-    this.contentEl.empty();
+    await this.pdfDocument?.destroy();
+    this.pdfDocument = null;
+    this.layerPanel = null;
+    this.document = null;
+    this.sourceFile = null;
   }
 
   private buildToolbar(): void {
