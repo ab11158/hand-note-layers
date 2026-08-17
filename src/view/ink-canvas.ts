@@ -40,9 +40,18 @@ export interface InkCanvasOptions {
 }
 
 export interface InkCanvasHistoryState {
-  undoStack: AnnotationDocument[];
-  redoStack: AnnotationDocument[];
+  undoStack: InkHistoryEntry[];
+  redoStack: InkHistoryEntry[];
 }
+
+type InkHistoryEntry =
+  | { kind: "snapshot"; document: AnnotationDocument }
+  | {
+      kind: "stroke-add";
+      layerId: string;
+      stroke: AnnotationStroke;
+      index: number;
+    };
 
 export class InkCanvas {
   private static readonly MAX_CANVAS_PIXELS = 12_000_000;
@@ -60,8 +69,8 @@ export class InkCanvas {
   private activePointerKind: "draw" | "pan" | null = null;
   private activeTool: AnnotationTool | null = null;
   private eraserChanged = false;
-  private undoStack: AnnotationDocument[] = [];
-  private redoStack: AnnotationDocument[] = [];
+  private undoStack: InkHistoryEntry[] = [];
+  private redoStack: InkHistoryEntry[] = [];
   private observer: ResizeObserver | null = null;
   private interactionFrame: number | null = null;
   private resizeFrame: number | null = null;
@@ -301,8 +310,25 @@ export class InkCanvas {
     this.activeTool = null;
     this.eraserChanged = false;
     this.cancelSelection();
-    this.redoStack.push(this.snapshotDocument(this.options.getDocument()));
-    this.options.onDocumentChange(previous);
+    if (previous.kind === "stroke-add") {
+      const document = this.options.getDocument();
+      const layer = document.layers.find((item) => item.id === previous.layerId);
+      if (!layer) {
+        return;
+      }
+      const index = layer.strokes.findIndex((stroke) => stroke.id === previous.stroke.id);
+      if (index >= 0) {
+        layer.strokes.splice(index, 1);
+      }
+      this.redoStack.push(previous);
+      this.options.onDocumentChange(document);
+      return;
+    }
+    this.redoStack.push({
+      kind: "snapshot",
+      document: this.snapshotDocument(this.options.getDocument())
+    });
+    this.options.onDocumentChange(previous.document);
   }
 
   redo(): void {
@@ -316,8 +342,23 @@ export class InkCanvas {
     this.activeTool = null;
     this.eraserChanged = false;
     this.cancelSelection();
-    this.undoStack.push(this.snapshotDocument(this.options.getDocument()));
-    this.options.onDocumentChange(next);
+    if (next.kind === "stroke-add") {
+      const document = this.options.getDocument();
+      const layer = document.layers.find((item) => item.id === next.layerId);
+      if (!layer) {
+        return;
+      }
+      const index = Math.max(0, Math.min(layer.strokes.length, next.index));
+      layer.strokes.splice(index, 0, next.stroke);
+      this.undoStack.push(next);
+      this.options.onDocumentChange(document);
+      return;
+    }
+    this.undoStack.push({
+      kind: "snapshot",
+      document: this.snapshotDocument(this.options.getDocument())
+    });
+    this.options.onDocumentChange(next.document);
   }
 
   clearActiveLayer(): void {
@@ -573,7 +614,6 @@ export class InkCanvas {
       return;
     }
 
-    this.pushHistory(document);
     this.activeStroke = {
       id: generateId(),
       tool,
@@ -668,6 +708,13 @@ export class InkCanvas {
       }
       this.eraserChanged = false;
     } else if (this.activeStroke) {
+      const layer = getActiveLayer(this.options.getDocument());
+      this.pushHistoryEntry({
+        kind: "stroke-add",
+        layerId: layer.id,
+        stroke: this.activeStroke,
+        index: Math.max(0, layer.strokes.length - 1)
+      });
       this.activeStroke = null;
       this.options.onInteraction?.("stroke-end");
       const document = this.options.getDocument();
@@ -910,7 +957,11 @@ export class InkCanvas {
   }
 
   private pushHistory(document: AnnotationDocument): void {
-    this.undoStack.push(this.snapshotDocument(document));
+    this.pushHistoryEntry({ kind: "snapshot", document: this.snapshotDocument(document) });
+  }
+
+  private pushHistoryEntry(entry: InkHistoryEntry): void {
+    this.undoStack.push(entry);
     if (this.undoStack.length > 100) {
       this.undoStack.shift();
     }
@@ -1034,34 +1085,35 @@ export class InkCanvas {
       }
     }
 
+    let pathOpen = false;
+    let batchWidth = 0;
     for (let index = Math.max(1, fromIndex); index < points.length; index += 1) {
       const previous = points[index - 1];
       const current = points[index];
-      context.lineWidth =
+      const width =
         (this.pressureWidth(stroke, previous.pressure) +
           this.pressureWidth(stroke, current.pressure)) /
         2;
-      context.beginPath();
-      context.moveTo(
-        previous.x * viewport.documentWidth - viewport.offsetX,
-        previous.y * viewport.documentHeight - viewport.offsetY
-      );
+      if (!pathOpen || Math.abs(width - batchWidth) >= 0.75) {
+        if (pathOpen) {
+          context.stroke();
+        }
+        batchWidth = width;
+        context.lineWidth = batchWidth;
+        context.beginPath();
+        context.moveTo(
+          previous.x * viewport.documentWidth - viewport.offsetX,
+          previous.y * viewport.documentHeight - viewport.offsetY
+        );
+        pathOpen = true;
+      }
       context.lineTo(
         current.x * viewport.documentWidth - viewport.offsetX,
         current.y * viewport.documentHeight - viewport.offsetY
       );
+    }
+    if (pathOpen) {
       context.stroke();
-      if (stroke.tool !== "highlighter") {
-        context.beginPath();
-        context.arc(
-          current.x * viewport.documentWidth - viewport.offsetX,
-          current.y * viewport.documentHeight - viewport.offsetY,
-          context.lineWidth / 2,
-          0,
-          Math.PI * 2
-        );
-        context.fill();
-      }
     }
     context.restore();
   }

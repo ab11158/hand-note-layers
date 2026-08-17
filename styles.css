@@ -93,16 +93,6 @@
   width: 17px;
 }
 
-.hand-note-color {
-  background: transparent;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 50%;
-  flex: 0 0 auto;
-  height: 32px;
-  padding: 2px;
-  width: 34px;
-}
-
 .hand-note-color-group {
   gap: 5px;
 }
@@ -119,14 +109,35 @@
   width: 30px;
 }
 
-.hand-note-color-swatch.is-custom {
-  background: transparent;
-  padding: 0;
-}
-
 .hand-note-color-swatch.is-active {
   box-shadow: 0 0 0 2px var(--interactive-accent);
   transform: scale(1.08);
+}
+
+.hand-note-color-menu {
+  flex-wrap: wrap;
+  max-width: 224px;
+}
+
+.hand-note-palette-swatch {
+  appearance: none;
+  background: var(--hand-note-swatch);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 50%;
+  flex: 0 0 auto;
+  height: 24px;
+  padding: 0;
+  width: 24px;
+}
+
+.hand-note-color-picker {
+  background: transparent;
+  border: 0;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0;
+  width: 28px;
 }
 
 .hand-note-slider {

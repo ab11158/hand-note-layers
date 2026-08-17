@@ -41,15 +41,31 @@ const TOOL_CONFIG: Array<{
   { tool: "select", icon: "lasso-select", label: "套索选择" }
 ];
 
-const FIXED_COLOR_PRESETS = ["#dc2626", "#2563eb", "#16a34a"];
-const CUSTOM_COLOR_PRESETS = ["#1f2937", "#9333ea", "#f59e0b"];
+const DEFAULT_COLOR_SLOTS = ["#dc2626", "#2563eb", "#16a34a", "#1f2937"];
+const COLOR_PALETTE = [
+  "#111827",
+  "#64748b",
+  "#dc2626",
+  "#ea580c",
+  "#ca8a04",
+  "#16a34a",
+  "#0891b2",
+  "#2563eb",
+  "#7c3aed",
+  "#db2777",
+  "#ffffff",
+  "#000000"
+];
+const COLOR_STORAGE_KEY = "hand-note-layers-color-slots";
 
 export class AnnotationToolbar {
   readonly element: HTMLDivElement;
   private readonly options: AnnotationToolbarOptions;
   private readonly toolButtons = new Map<AnnotationTool, HTMLButtonElement>();
-  private readonly colorButtons = new Map<string, HTMLButtonElement>();
-  private readonly customColor: HTMLInputElement;
+  private readonly colorButtons: HTMLButtonElement[] = [];
+  private readonly colorSlots: string[];
+  private readonly colorMenu: HTMLDivElement;
+  private activeColorSlot = 0;
   private readonly sizeControl;
   private readonly pressureButton: HTMLButtonElement;
   private readonly pencilShortcutButton: HTMLButtonElement;
@@ -66,6 +82,13 @@ export class AnnotationToolbar {
     this.options = options;
     this.currentTool = options.initialTool;
     this.element = createToolbar();
+    this.colorSlots = this.loadColorSlots();
+    const initialSlot = this.colorSlots.findIndex(
+      (color) => color.toLowerCase() === options.initialColor.toLowerCase()
+    );
+    this.activeColorSlot = initialSlot >= 0 ? initialSlot : 0;
+    this.colorMenu = document.createElement("div");
+    this.colorMenu.className = "hand-note-eraser-menu hand-note-color-menu";
     this.selectionMenu = document.createElement("div");
     this.selectionMenu.className = "hand-note-eraser-menu";
     this.selectionMenu.append(
@@ -124,35 +147,24 @@ export class AnnotationToolbar {
     historyGroup.append(undoButton, redoButton, clearButton);
 
     const colorGroup = this.createGroup("hand-note-color-group");
-    for (const color of FIXED_COLOR_PRESETS) {
+    this.colorSlots.forEach((color, index) => {
       const swatch = document.createElement("button");
       swatch.type = "button";
       swatch.className = "hand-note-color-swatch";
       swatch.style.setProperty("--hand-note-swatch", color);
-      swatch.setAttribute("aria-label", `颜色 ${color}`);
-      swatch.addEventListener("click", () => options.onColorChange(color));
-      this.colorButtons.set(color, swatch);
+      swatch.setAttribute("aria-label", `颜色位 ${index + 1}`);
+      swatch.setAttribute("title", `颜色位 ${index + 1}`);
+      swatch.addEventListener("click", () => {
+        this.activeColorSlot = index;
+        options.onColorChange(this.colorSlots[index]);
+        this.setColor(this.colorSlots[index]);
+        this.colorMenu.classList.toggle("is-open");
+      });
+      this.colorButtons.push(swatch);
       colorGroup.append(swatch);
-    }
-    for (const color of CUSTOM_COLOR_PRESETS) {
-      const swatch = document.createElement("input");
-      swatch.type = "color";
-      swatch.value = color;
-      swatch.className = "hand-note-color-swatch is-custom";
-      swatch.setAttribute("aria-label", "自定义预设颜色");
-      swatch.addEventListener("input", () => options.onColorChange(swatch.value));
-      colorGroup.append(swatch);
-    }
-
-    this.customColor = document.createElement("input");
-    this.customColor.type = "color";
-    this.customColor.value = options.initialColor;
-    this.customColor.className = "hand-note-color";
-    this.customColor.setAttribute("aria-label", "自定义笔迹颜色");
-    this.customColor.addEventListener("input", () => {
-      options.onColorChange(this.customColor.value);
     });
-    colorGroup.append(this.customColor);
+    this.buildColorMenu();
+    colorGroup.append(this.colorMenu);
 
     this.sizeControl = createLabeledSlider(
       "粗细",
@@ -245,10 +257,15 @@ export class AnnotationToolbar {
   }
 
   setColor(color: string): void {
-    this.customColor.value = color;
-    for (const [candidate, button] of this.colorButtons) {
-      button.classList.toggle("is-active", candidate.toLowerCase() === color.toLowerCase());
+    const matchingSlot = this.colorSlots.findIndex(
+      (candidate) => candidate.toLowerCase() === color.toLowerCase()
+    );
+    if (matchingSlot >= 0) {
+      this.activeColorSlot = matchingSlot;
     }
+    this.colorButtons.forEach((button, index) => {
+      button.classList.toggle("is-active", index === this.activeColorSlot);
+    });
   }
 
   setPressureEnabled(enabled: boolean): void {
@@ -353,6 +370,56 @@ export class AnnotationToolbar {
     });
     this.selectionModeButtons.set(mode, button);
     return button;
+  }
+
+  private buildColorMenu(): void {
+    for (const color of COLOR_PALETTE) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "hand-note-palette-swatch";
+      button.style.setProperty("--hand-note-swatch", color);
+      button.setAttribute("aria-label", `选择颜色 ${color}`);
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this.updateActiveColorSlot(color);
+      });
+      this.colorMenu.append(button);
+    }
+    const picker = document.createElement("input");
+    picker.type = "color";
+    picker.className = "hand-note-color-picker";
+    picker.setAttribute("aria-label", "拾色器");
+    picker.addEventListener("input", () => this.updateActiveColorSlot(picker.value));
+    this.colorMenu.append(picker);
+  }
+
+  private updateActiveColorSlot(color: string): void {
+    this.colorSlots[this.activeColorSlot] = color;
+    const button = this.colorButtons[this.activeColorSlot];
+    button?.style.setProperty("--hand-note-swatch", color);
+    try {
+      window.localStorage.setItem(COLOR_STORAGE_KEY, JSON.stringify(this.colorSlots));
+    } catch {
+      // Color slots still work for the current session when storage is unavailable.
+    }
+    this.options.onColorChange(color);
+    this.setColor(color);
+  }
+
+  private loadColorSlots(): string[] {
+    try {
+      const value = JSON.parse(window.localStorage.getItem(COLOR_STORAGE_KEY) ?? "null");
+      if (
+        Array.isArray(value) &&
+        value.length === 4 &&
+        value.every((color) => typeof color === "string" && /^#[0-9a-f]{6}$/i.test(color))
+      ) {
+        return value;
+      }
+    } catch {
+      // Fall back to the standard four colors.
+    }
+    return DEFAULT_COLOR_SLOTS.slice();
   }
 
   private setToggle(button: HTMLButtonElement, enabled: boolean): void {

@@ -78,7 +78,7 @@ export function generateId(): string {
 }
 
 export function createEmptyDocument(sourcePath: string): AnnotationDocument {
-  const layer = createLayer("图层 1");
+  const layer = createLayer("图层1");
   return {
     schemaVersion: 1,
     sourcePath,
@@ -97,6 +97,17 @@ export function createLayer(name: string): AnnotationLayer {
     opacity: 1,
     strokes: []
   };
+}
+
+export function nextLayerName(document: AnnotationDocument): string {
+  let maximum = 0;
+  for (const layer of document.layers) {
+    const match = /^图层\s*(\d+)$/.exec(layer.name);
+    if (match) {
+      maximum = Math.max(maximum, Number(match[1]));
+    }
+  }
+  return `图层${maximum + 1}`;
 }
 
 export function cloneDocument(document: AnnotationDocument): AnnotationDocument {

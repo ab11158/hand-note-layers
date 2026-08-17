@@ -11,7 +11,8 @@ import {
   EraserMode,
   SelectionMode,
   createLayer,
-  getActiveLayer
+  getActiveLayer,
+  nextLayerName
 } from "../model/annotation";
 import {
   loadAnnotation,
@@ -372,7 +373,7 @@ export class MarkdownAnnotationView extends ItemView {
       return;
     }
     this.inkCanvas?.recordHistory();
-    const layer = createLayer(`图层 ${this.document.layers.length + 1}`);
+    const layer = createLayer(nextLayerName(this.document));
     this.document.layers.push(layer);
     this.document.activeLayerId = layer.id;
     this.handleDocumentChange(this.document);
@@ -617,7 +618,7 @@ export class MarkdownAnnotationView extends ItemView {
 
     const workspaceHeight = Math.min(
       visible.documentHeight,
-      Math.max(visible.height * 3, visible.height + 512)
+      Math.max(visible.height * 2.5, visible.height + 384)
     );
     const maxTop = Math.max(0, visible.documentHeight - workspaceHeight);
     let offsetY = Math.max(

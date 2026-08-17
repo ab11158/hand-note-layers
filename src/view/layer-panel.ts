@@ -71,13 +71,21 @@ export class LayerPanel {
 
     const content = document.createElement("div");
     content.className = "hand-note-layer-content";
-    content.addEventListener("click", () => this.callbacks.onSelectLayer(layer.id));
 
     const name = document.createElement("span");
     name.className = "hand-note-layer-name";
     name.textContent = layer.name;
     name.title = "双击重命名";
-    const startRename = () => {
+    let clickTimer: number | null = null;
+    let longPressTimer: number | null = null;
+    let longPressStart: { x: number; y: number } | null = null;
+    const startRename = (event?: Event) => {
+      event?.preventDefault();
+      event?.stopPropagation();
+      if (clickTimer !== null) {
+        window.clearTimeout(clickTimer);
+        clickTimer = null;
+      }
       const input = document.createElement("input");
       input.type = "text";
       input.value = layer.name;
@@ -86,7 +94,12 @@ export class LayerPanel {
       input.focus();
       input.select();
 
+      let finished = false;
       const commit = () => {
+        if (finished) {
+          return;
+        }
+        finished = true;
         const nextName = input.value.trim() || layer.name;
         this.callbacks.onRenameLayer(layer.id, nextName);
       };
@@ -94,10 +107,52 @@ export class LayerPanel {
       input.addEventListener("keydown", (event) => {
         if (event.key === "Enter") {
           commit();
+        } else if (event.key === "Escape") {
+          finished = true;
+          input.replaceWith(name);
         }
       });
     };
+    name.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (clickTimer !== null) {
+        window.clearTimeout(clickTimer);
+      }
+      clickTimer = window.setTimeout(() => {
+        clickTimer = null;
+        this.callbacks.onSelectLayer(layer.id);
+      }, 220);
+    });
     name.addEventListener("dblclick", startRename);
+    name.addEventListener("contextmenu", startRename);
+    name.addEventListener("pointerdown", (event) => {
+      if (event.pointerType !== "touch") {
+        return;
+      }
+      longPressStart = { x: event.clientX, y: event.clientY };
+      longPressTimer = window.setTimeout(() => {
+        longPressTimer = null;
+        longPressStart = null;
+        startRename(event);
+      }, 520);
+    });
+    const cancelLongPress = () => {
+      if (longPressTimer !== null) {
+        window.clearTimeout(longPressTimer);
+        longPressTimer = null;
+      }
+      longPressStart = null;
+    };
+    name.addEventListener("pointerup", cancelLongPress);
+    name.addEventListener("pointercancel", cancelLongPress);
+    name.addEventListener("pointermove", (event) => {
+      if (
+        longPressStart &&
+        Math.hypot(event.clientX - longPressStart.x, event.clientY - longPressStart.y) > 10
+      ) {
+        cancelLongPress();
+      }
+    });
 
     const opacity = document.createElement("input");
     opacity.type = "range";

@@ -53,7 +53,10 @@ function migrateDocument(value: unknown, sourcePath: string): AnnotationDocument
     sourcePath: candidate.sourcePath ?? sourcePath,
     layers: candidate.layers.map((layer) => ({
       id: layer.id,
-      name: layer.name,
+      name:
+        typeof layer.name === "string"
+          ? layer.name.replace(/^图层\s+(\d+)$/, "图层$1")
+          : "图层1",
       visible: layer.visible ?? true,
       opacity: layer.opacity ?? 1,
       whiteboard: layer.whiteboard,

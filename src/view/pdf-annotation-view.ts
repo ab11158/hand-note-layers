@@ -12,7 +12,8 @@ import {
   EraserMode,
   SelectionMode,
   createLayer,
-  getActiveLayer
+  getActiveLayer,
+  nextLayerName
 } from "../model/annotation";
 import {
   loadAnnotation,
@@ -833,7 +834,7 @@ export class PdfAnnotationView extends ItemView {
       return;
     }
     this.currentDocumentInkCanvas()?.recordHistory();
-    const layer = createLayer(`图层 ${this.document.layers.length + 1}`);
+    const layer = createLayer(nextLayerName(this.document));
     this.document.layers.push(layer);
     this.document.activeLayerId = layer.id;
     this.handleDocumentChange(this.document);
