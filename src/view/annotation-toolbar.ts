@@ -1,5 +1,5 @@
 import { setIcon } from "obsidian";
-import { AnnotationTool } from "../model/annotation";
+import { AnnotationTool, EraserMode } from "../model/annotation";
 import { createIconButton, createLabeledSlider, createToolbar } from "./ui";
 
 export type AnnotationSaveStatus = "saved" | "saving" | "error";
@@ -8,15 +8,16 @@ export interface AnnotationToolbarOptions {
   initialTool: AnnotationTool;
   initialColor: string;
   initialPressureEnabled: boolean;
-  initialFingerDrawingEnabled: boolean;
   initialPencilShortcutEnabled: boolean;
+  initialEraserMode: EraserMode;
   getSize: (tool: AnnotationTool) => number;
   onToolChange: (tool: AnnotationTool) => void;
   onColorChange: (color: string) => void;
   onSizeChange: (tool: AnnotationTool, size: number) => void;
   onPressureChange: (enabled: boolean) => void;
-  onFingerDrawingChange: (enabled: boolean) => void;
   onPencilShortcutChange: (enabled: boolean) => void;
+  onEraserModeChange: (mode: EraserMode) => void;
+  onWhiteboard: () => void;
   onUndo: () => void;
   onRedo: () => void;
   onClear: () => void;
@@ -34,7 +35,7 @@ const TOOL_CONFIG: Array<{
   { tool: "pen", icon: "pen-tool", label: "钢笔" },
   { tool: "pencil", icon: "pencil", label: "铅笔" },
   { tool: "highlighter", icon: "highlighter", label: "荧光笔" },
-  { tool: "eraser", icon: "eraser", label: "整笔橡皮擦" },
+  { tool: "eraser", icon: "eraser", label: "橡皮擦" },
   { tool: "select", icon: "lasso-select", label: "套索选择" }
 ];
 
@@ -55,8 +56,10 @@ export class AnnotationToolbar {
   private readonly customColor: HTMLInputElement;
   private readonly sizeControl;
   private readonly pressureButton: HTMLButtonElement;
-  private readonly fingerButton: HTMLButtonElement;
   private readonly pencilShortcutButton: HTMLButtonElement;
+  private readonly eraserMenu: HTMLDivElement;
+  private readonly eraserModeButtons = new Map<EraserMode, HTMLButtonElement>();
+  private readonly whiteboardButton: HTMLButtonElement;
   private readonly saveButton: HTMLButtonElement;
   private readonly saveStatus: HTMLSpanElement;
   private currentTool: AnnotationTool;
@@ -69,10 +72,33 @@ export class AnnotationToolbar {
     const toolGroup = this.createGroup();
     for (const config of TOOL_CONFIG) {
       const button = createIconButton(config.icon, config.label);
-      button.addEventListener("click", () => options.onToolChange(config.tool));
+      button.addEventListener("click", () => {
+        if (config.tool === "eraser" && this.currentTool === "eraser") {
+          this.eraserMenu.classList.toggle("is-open");
+          return;
+        }
+        this.eraserMenu.classList.remove("is-open");
+        options.onToolChange(config.tool);
+      });
       this.toolButtons.set(config.tool, button);
-      toolGroup.append(button);
+      if (config.tool === "eraser") {
+        const wrapper = document.createElement("div");
+        wrapper.className = "hand-note-tool-menu-wrap";
+        this.eraserMenu = document.createElement("div");
+        this.eraserMenu.className = "hand-note-eraser-menu";
+        this.eraserMenu.append(
+          this.createEraserModeButton("partial", "局部擦除", "eraser"),
+          this.createEraserModeButton("stroke", "整笔擦除", "delete")
+        );
+        wrapper.append(button, this.eraserMenu);
+        toolGroup.append(wrapper);
+      } else {
+        toolGroup.append(button);
+      }
     }
+    this.whiteboardButton = createIconButton("presentation", "临时白板");
+    this.whiteboardButton.addEventListener("click", options.onWhiteboard);
+    toolGroup.append(this.whiteboardButton);
 
     const historyGroup = this.createGroup();
     const undoButton = createIconButton("undo-2", "撤回上一步操作");
@@ -119,10 +145,6 @@ export class AnnotationToolbar {
     this.pressureButton.addEventListener("click", () => {
       options.onPressureChange(!this.pressureButton.classList.contains("is-active"));
     });
-    this.fingerButton = createIconButton("fingerprint", "允许手指书写");
-    this.fingerButton.addEventListener("click", () => {
-      options.onFingerDrawingChange(!this.fingerButton.classList.contains("is-active"));
-    });
     this.pencilShortcutButton = createIconButton(
       "repeat-2",
       "触控笔快捷键切换钢笔与橡皮擦"
@@ -132,11 +154,7 @@ export class AnnotationToolbar {
         !this.pencilShortcutButton.classList.contains("is-active")
       );
     });
-    inputGroup.append(
-      this.pressureButton,
-      this.fingerButton,
-      this.pencilShortcutButton
-    );
+    inputGroup.append(this.pressureButton, this.pencilShortcutButton);
 
     const documentGroup = this.createGroup();
     this.saveButton = createIconButton("save", "立即保存批注");
@@ -166,13 +184,16 @@ export class AnnotationToolbar {
     this.setTool(options.initialTool);
     this.setColor(options.initialColor);
     this.setPressureEnabled(options.initialPressureEnabled);
-    this.setFingerDrawingEnabled(options.initialFingerDrawingEnabled);
     this.setPencilShortcutEnabled(options.initialPencilShortcutEnabled);
+    this.setEraserMode(options.initialEraserMode);
     this.setSaveStatus("saved");
   }
 
   setTool(tool: AnnotationTool): void {
     this.currentTool = tool;
+    if (tool !== "eraser") {
+      this.eraserMenu.classList.remove("is-open");
+    }
     for (const [candidate, button] of this.toolButtons) {
       button.classList.toggle("is-active", candidate === tool);
       button.setAttribute("aria-pressed", String(candidate === tool));
@@ -203,12 +224,24 @@ export class AnnotationToolbar {
     this.setToggle(this.pressureButton, enabled);
   }
 
-  setFingerDrawingEnabled(enabled: boolean): void {
-    this.setToggle(this.fingerButton, enabled);
-  }
-
   setPencilShortcutEnabled(enabled: boolean): void {
     this.setToggle(this.pencilShortcutButton, enabled);
+  }
+
+  setEraserMode(mode: EraserMode): void {
+    for (const [candidate, button] of this.eraserModeButtons) {
+      button.classList.toggle("is-active", candidate === mode);
+      button.setAttribute("aria-pressed", String(candidate === mode));
+    }
+    const eraserButton = this.toolButtons.get("eraser");
+    eraserButton?.setAttribute(
+      "aria-label",
+      mode === "partial" ? "橡皮擦：局部擦除" : "橡皮擦：整笔擦除"
+    );
+  }
+
+  setWhiteboardActive(active: boolean): void {
+    this.setToggle(this.whiteboardButton, active);
   }
 
   setSaveStatus(status: AnnotationSaveStatus): void {
@@ -236,6 +269,29 @@ export class AnnotationToolbar {
     divider.className = "hand-note-toolbar-divider";
     divider.setAttribute("aria-hidden", "true");
     return divider;
+  }
+
+  private createEraserModeButton(
+    mode: EraserMode,
+    label: string,
+    icon: string
+  ): HTMLButtonElement {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "hand-note-eraser-option";
+    button.setAttribute("aria-label", label);
+    setIcon(button, icon);
+    const text = document.createElement("span");
+    text.textContent = label;
+    button.append(text);
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.options.onEraserModeChange(mode);
+      this.setEraserMode(mode);
+      this.eraserMenu.classList.remove("is-open");
+    });
+    this.eraserModeButtons.set(mode, button);
+    return button;
   }
 
   private setToggle(button: HTMLButtonElement, enabled: boolean): void {

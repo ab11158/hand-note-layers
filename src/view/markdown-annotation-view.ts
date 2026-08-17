@@ -8,6 +8,7 @@ import {
 import {
   AnnotationDocument,
   AnnotationTool,
+  EraserMode,
   createLayer,
   getActiveLayer
 } from "../model/annotation";
@@ -18,6 +19,7 @@ import {
 import { AnnotationToolbar } from "./annotation-toolbar";
 import { InkCanvas, InkCanvasViewport } from "./ink-canvas";
 import { LayerPanel } from "./layer-panel";
+import { TemporaryWhiteboard } from "./temporary-whiteboard";
 
 export const MARKDOWN_ANNOTATION_VIEW_TYPE = "hand-note-markdown-annotation";
 
@@ -27,6 +29,8 @@ export class MarkdownAnnotationView extends ItemView {
   private inkCanvas: InkCanvas | null = null;
   private layerPanel: LayerPanel | null = null;
   private annotationToolbar: AnnotationToolbar | null = null;
+  private whiteboard: TemporaryWhiteboard | null = null;
+  private activeInkTarget: "document" | "whiteboard" = "document";
   private markdownBody: HTMLDivElement;
   private surface: HTMLDivElement;
   private scrollContainer: HTMLDivElement;
@@ -47,8 +51,8 @@ export class MarkdownAnnotationView extends ItemView {
     select: 4
   };
   private pressureEnabled = true;
-  private fingerDrawingEnabled = false;
   private pencilShortcutEnabled = true;
+  private eraserMode: EraserMode = "partial";
 
   constructor(leaf: WorkspaceLeaf) {
     super(leaf);
@@ -142,10 +146,19 @@ export class MarkdownAnnotationView extends ItemView {
       getColor: () => this.currentColor,
       getSize: () => this.toolSizes[this.currentTool],
       getEraserSize: () => this.toolSizes.eraser,
+      getEraserMode: () => this.eraserMode,
       getPressureEnabled: () => this.pressureEnabled,
-      getFingerDrawingEnabled: () => this.fingerDrawingEnabled,
       onDocumentChange: (next, renderCanvas) =>
         this.handleDocumentChange(next, renderCanvas),
+      onActivate: () => {
+        this.activeInkTarget = "document";
+        this.whiteboard?.setEditing(false);
+        this.annotationToolbar?.setWhiteboardActive(false);
+      },
+      onFingerPan: (deltaX, deltaY) => {
+        this.scrollContainer.scrollLeft += deltaX;
+        this.scrollContainer.scrollTop += deltaY;
+      },
       onInteraction: (type) => {
         if (type === "stroke-start") {
           this.cancelScheduledSave();
@@ -173,6 +186,8 @@ export class MarkdownAnnotationView extends ItemView {
       this.saveTimer = null;
     }
     await this.flushSave();
+    this.whiteboard?.destroy();
+    this.whiteboard = null;
     this.inkCanvas?.destroy();
     this.surfaceObserver?.disconnect();
     this.surfaceObserver = null;
@@ -200,8 +215,8 @@ export class MarkdownAnnotationView extends ItemView {
       initialTool: this.currentTool,
       initialColor: this.currentColor,
       initialPressureEnabled: this.pressureEnabled,
-      initialFingerDrawingEnabled: this.fingerDrawingEnabled,
       initialPencilShortcutEnabled: this.pencilShortcutEnabled,
+      initialEraserMode: this.eraserMode,
       getSize: (tool) => this.toolSizes[tool],
       onToolChange: (tool) => this.setTool(tool),
       onColorChange: (color) => this.setColor(color),
@@ -212,14 +227,17 @@ export class MarkdownAnnotationView extends ItemView {
         this.pressureEnabled = enabled;
         this.annotationToolbar?.setPressureEnabled(enabled);
       },
-      onFingerDrawingChange: (enabled) => this.setFingerDrawingEnabled(enabled),
       onPencilShortcutChange: (enabled) => {
         this.pencilShortcutEnabled = enabled;
         this.annotationToolbar?.setPencilShortcutEnabled(enabled);
       },
-      onUndo: () => this.inkCanvas?.undo(),
-      onRedo: () => this.inkCanvas?.redo(),
-      onClear: () => this.inkCanvas?.clearActiveLayer(),
+      onEraserModeChange: (mode) => {
+        this.eraserMode = mode;
+      },
+      onWhiteboard: () => this.toggleWhiteboard(),
+      onUndo: () => this.currentInkCanvas()?.undo(),
+      onRedo: () => this.currentInkCanvas()?.redo(),
+      onClear: () => this.currentInkCanvas()?.clearActiveLayer(),
       onSave: () => void this.flushSave(),
       onLayers: () => {
         this.toggleLayerPanel(!this.layerPanel?.element.classList.contains("is-open"));
@@ -269,17 +287,14 @@ export class MarkdownAnnotationView extends ItemView {
     this.currentTool = tool;
     this.annotationToolbar?.setTool(tool);
     this.inkCanvas?.updateInputMode();
+    this.whiteboard?.updateInputMode();
+    this.whiteboard?.setEditing(false);
+    this.annotationToolbar?.setWhiteboardActive(false);
   }
 
   private setColor(color: string): void {
     this.currentColor = color;
     this.annotationToolbar?.setColor(color);
-  }
-
-  private setFingerDrawingEnabled(enabled: boolean): void {
-    this.fingerDrawingEnabled = enabled;
-    this.annotationToolbar?.setFingerDrawingEnabled(enabled);
-    this.inkCanvas?.updateInputMode();
   }
 
   togglePenAndEraser(): void {
@@ -419,6 +434,67 @@ export class MarkdownAnnotationView extends ItemView {
 
   private toggleLayerPanel(open: boolean): void {
     this.layerPanel?.element.classList.toggle("is-open", open);
+  }
+
+  private currentInkCanvas(): InkCanvas | null {
+    if (this.activeInkTarget === "whiteboard" && this.whiteboard) {
+      return this.whiteboard.inkCanvas;
+    }
+    return this.inkCanvas;
+  }
+
+  private toggleWhiteboard(): void {
+    if (this.whiteboard) {
+      const editing = !this.whiteboard.isEditing();
+      this.whiteboard.setEditing(editing);
+      this.annotationToolbar?.setWhiteboardActive(editing);
+      if (editing) {
+        this.activeInkTarget = "whiteboard";
+      }
+      return;
+    }
+
+    const visible = this.visibleSurfaceRange();
+    const margin = 12;
+    const width = Math.max(
+      240,
+      Math.min(visible.documentWidth - margin * 2, visible.documentWidth * 0.88)
+    );
+    const availableHeight = Math.max(180, visible.documentHeight - visible.top - margin);
+    const height = Math.max(180, Math.min(availableHeight, visible.height * 0.58));
+    const top = Math.min(
+      visible.documentHeight - height,
+      visible.top + visible.height * 0.4
+    );
+    this.whiteboard = new TemporaryWhiteboard({
+      host: this.surface,
+      initialBounds: {
+        left: Math.max(0, (visible.documentWidth - width) / 2),
+        top: Math.max(0, top),
+        width,
+        height
+      },
+      getTool: () => this.currentTool,
+      getColor: () => this.currentColor,
+      getSize: () => this.toolSizes[this.currentTool],
+      getEraserSize: () => this.toolSizes.eraser,
+      getEraserMode: () => this.eraserMode,
+      getPressureEnabled: () => this.pressureEnabled,
+      onActivate: () => {
+        this.activeInkTarget = "whiteboard";
+      },
+      onDelete: () => this.deleteWhiteboard(),
+      onPencilShortcut: () => this.togglePenAndEraser()
+    });
+    this.activeInkTarget = "whiteboard";
+    this.annotationToolbar?.setWhiteboardActive(true);
+  }
+
+  private deleteWhiteboard(): void {
+    this.whiteboard?.destroy();
+    this.whiteboard = null;
+    this.activeInkTarget = "document";
+    this.annotationToolbar?.setWhiteboardActive(false);
   }
 
   private handleMarkdownScroll = (): void => {

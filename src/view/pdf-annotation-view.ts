@@ -9,6 +9,7 @@ import pdfWorkerDataUrl from "pdfjs-dist/build/pdf.worker.min.mjs?worker-dataurl
 import {
   AnnotationDocument,
   AnnotationTool,
+  EraserMode,
   createLayer,
   getActiveLayer
 } from "../model/annotation";
@@ -20,6 +21,7 @@ import { AnnotationToolbar } from "./annotation-toolbar";
 import { InkCanvas, InkCanvasHistoryState } from "./ink-canvas";
 import { LayerPanel } from "./layer-panel";
 import { createIconButton } from "./ui";
+import { TemporaryWhiteboard } from "./temporary-whiteboard";
 
 export const PDF_ANNOTATION_VIEW_TYPE = "hand-note-pdf-annotation";
 
@@ -50,6 +52,9 @@ export class PdfAnnotationView extends ItemView {
   private pdfDocument: pdfjsLib.PDFDocumentProxy | null = null;
   private toolbar: HTMLDivElement;
   private annotationToolbar: AnnotationToolbar | null = null;
+  private whiteboard: TemporaryWhiteboard | null = null;
+  private whiteboardPageIndex: number | null = null;
+  private activeInkTarget: "document" | "whiteboard" = "document";
   private pageContainer: HTMLDivElement;
   private scrollContainer: HTMLDivElement;
   private layerPanel: LayerPanel | null = null;
@@ -75,8 +80,8 @@ export class PdfAnnotationView extends ItemView {
     select: 4
   };
   private pressureEnabled = true;
-  private fingerDrawingEnabled = false;
   private pencilShortcutEnabled = true;
+  private eraserMode: EraserMode = "partial";
   private pageScale = 1;
   private saveTimer: number | null = null;
 
@@ -167,6 +172,9 @@ export class PdfAnnotationView extends ItemView {
       this.saveTimer = null;
     }
     await this.flushSave();
+    this.whiteboard?.destroy();
+    this.whiteboard = null;
+    this.whiteboardPageIndex = null;
     this.pageRenderGeneration += 1;
     this.pageObserver?.disconnect();
     this.pageObserver = null;
@@ -228,8 +236,8 @@ export class PdfAnnotationView extends ItemView {
       initialTool: this.currentTool,
       initialColor: this.currentColor,
       initialPressureEnabled: this.pressureEnabled,
-      initialFingerDrawingEnabled: this.fingerDrawingEnabled,
       initialPencilShortcutEnabled: this.pencilShortcutEnabled,
+      initialEraserMode: this.eraserMode,
       getSize: (tool) => this.toolSizes[tool],
       onToolChange: (tool) => this.setTool(tool),
       onColorChange: (color) => this.setColor(color),
@@ -240,11 +248,14 @@ export class PdfAnnotationView extends ItemView {
         this.pressureEnabled = enabled;
         this.annotationToolbar?.setPressureEnabled(enabled);
       },
-      onFingerDrawingChange: (enabled) => this.setFingerDrawingEnabled(enabled),
       onPencilShortcutChange: (enabled) => {
         this.pencilShortcutEnabled = enabled;
         this.annotationToolbar?.setPencilShortcutEnabled(enabled);
       },
+      onEraserModeChange: (mode) => {
+        this.eraserMode = mode;
+      },
+      onWhiteboard: () => void this.toggleWhiteboard(),
       onUndo: () => this.currentInkCanvas()?.undo(),
       onRedo: () => this.currentInkCanvas()?.redo(),
       onClear: () => this.currentInkCanvas()?.clearActiveLayer(),
@@ -310,6 +321,8 @@ export class PdfAnnotationView extends ItemView {
     if (!pdfDocument) {
       return;
     }
+
+    this.deleteWhiteboard();
 
     const generation = ++this.pageRenderGeneration;
     this.pageObserver?.disconnect();
@@ -421,10 +434,19 @@ export class PdfAnnotationView extends ItemView {
       getColor: () => this.currentColor,
       getSize: () => this.toolSizes[this.currentTool],
       getEraserSize: () => this.toolSizes.eraser,
+      getEraserMode: () => this.eraserMode,
       getPressureEnabled: () => this.pressureEnabled,
-      getFingerDrawingEnabled: () => this.fingerDrawingEnabled,
       onDocumentChange: (next, renderCanvas) =>
         this.handleDocumentChange(next, renderCanvas),
+      onActivate: () => {
+        this.activeInkTarget = "document";
+        this.whiteboard?.setEditing(false);
+        this.annotationToolbar?.setWhiteboardActive(false);
+      },
+      onFingerPan: (deltaX, deltaY) => {
+        this.scrollContainer.scrollLeft += deltaX;
+        this.scrollContainer.scrollTop += deltaY;
+      },
       onInteraction: (type) => {
         if (type === "stroke-start") {
           this.cancelScheduledSave();
@@ -447,6 +469,13 @@ export class PdfAnnotationView extends ItemView {
   }
 
   private currentInkCanvas(): InkCanvas | null {
+    if (this.activeInkTarget === "whiteboard" && this.whiteboard) {
+      return this.whiteboard.inkCanvas;
+    }
+    return this.currentDocumentInkCanvas();
+  }
+
+  private currentDocumentInkCanvas(): InkCanvas | null {
     return this.inkCanvases.get(this.currentPage) ?? null;
   }
 
@@ -524,6 +553,9 @@ export class PdfAnnotationView extends ItemView {
       if (this.nearbyPages.has(pageIndex) || pageIndex === this.currentPage) {
         return;
       }
+      if (pageIndex === this.whiteboardPageIndex) {
+        return;
+      }
       if (this.pageRenderPromises.has(pageIndex)) {
         this.schedulePageUnload(pageIndex);
         return;
@@ -593,6 +625,9 @@ export class PdfAnnotationView extends ItemView {
     for (const canvas of this.inkCanvases.values()) {
       canvas.updateInputMode();
     }
+    this.whiteboard?.updateInputMode();
+    this.whiteboard?.setEditing(false);
+    this.annotationToolbar?.setWhiteboardActive(false);
   }
 
   private setColor(color: string): void {
@@ -600,12 +635,72 @@ export class PdfAnnotationView extends ItemView {
     this.annotationToolbar?.setColor(color);
   }
 
-  private setFingerDrawingEnabled(enabled: boolean): void {
-    this.fingerDrawingEnabled = enabled;
-    this.annotationToolbar?.setFingerDrawingEnabled(enabled);
-    for (const canvas of this.inkCanvases.values()) {
-      canvas.updateInputMode();
+  private async toggleWhiteboard(): Promise<void> {
+    if (this.whiteboard) {
+      const editing = !this.whiteboard.isEditing();
+      this.whiteboard.setEditing(editing);
+      this.annotationToolbar?.setWhiteboardActive(editing);
+      if (editing) {
+        this.activeInkTarget = "whiteboard";
+      }
+      return;
     }
+
+    await this.renderPage(this.currentPage);
+    const pageEl = this.pageElements.get(this.currentPage);
+    if (!pageEl) {
+      return;
+    }
+    const pageRect = pageEl.getBoundingClientRect();
+    const scrollRect = this.scrollContainer.getBoundingClientRect();
+    const visibleTop = Math.max(0, scrollRect.top - pageRect.top);
+    const visibleBottom = Math.min(pageEl.clientHeight, scrollRect.bottom - pageRect.top);
+    const visibleHeight = Math.max(180, visibleBottom - visibleTop);
+    const margin = 12;
+    const width = Math.max(
+      240,
+      Math.min(pageEl.clientWidth - margin * 2, pageEl.clientWidth * 0.88)
+    );
+    const height = Math.max(
+      180,
+      Math.min(pageEl.clientHeight - margin * 2, visibleHeight * 0.58)
+    );
+    const top = Math.min(
+      pageEl.clientHeight - height,
+      visibleTop + visibleHeight * 0.4
+    );
+    const pageIndex = this.currentPage;
+    this.whiteboardPageIndex = pageIndex;
+    this.whiteboard = new TemporaryWhiteboard({
+      host: pageEl,
+      initialBounds: {
+        left: Math.max(0, (pageEl.clientWidth - width) / 2),
+        top: Math.max(0, top),
+        width,
+        height
+      },
+      getTool: () => this.currentTool,
+      getColor: () => this.currentColor,
+      getSize: () => this.toolSizes[this.currentTool],
+      getEraserSize: () => this.toolSizes.eraser,
+      getEraserMode: () => this.eraserMode,
+      getPressureEnabled: () => this.pressureEnabled,
+      onActivate: () => {
+        this.activeInkTarget = "whiteboard";
+      },
+      onDelete: () => this.deleteWhiteboard(),
+      onPencilShortcut: () => this.togglePenAndEraser()
+    });
+    this.activeInkTarget = "whiteboard";
+    this.annotationToolbar?.setWhiteboardActive(true);
+  }
+
+  private deleteWhiteboard(): void {
+    this.whiteboard?.destroy();
+    this.whiteboard = null;
+    this.whiteboardPageIndex = null;
+    this.activeInkTarget = "document";
+    this.annotationToolbar?.setWhiteboardActive(false);
   }
 
   togglePenAndEraser(): void {
@@ -672,7 +767,7 @@ export class PdfAnnotationView extends ItemView {
     if (!this.document) {
       return;
     }
-    this.currentInkCanvas()?.recordHistory();
+    this.currentDocumentInkCanvas()?.recordHistory();
     const layer = createLayer(`图层 ${this.document.layers.length + 1}`);
     this.document.layers.push(layer);
     this.document.activeLayerId = layer.id;
@@ -683,7 +778,7 @@ export class PdfAnnotationView extends ItemView {
     if (!this.document || this.document.layers.length <= 1) {
       return;
     }
-    this.currentInkCanvas()?.recordHistory();
+    this.currentDocumentInkCanvas()?.recordHistory();
     this.document.layers = this.document.layers.filter((layer) => layer.id !== layerId);
     if (this.document.activeLayerId === layerId) {
       this.document.activeLayerId = this.document.layers[0].id;
@@ -704,7 +799,7 @@ export class PdfAnnotationView extends ItemView {
     if (!layer) {
       return;
     }
-    this.currentInkCanvas()?.recordHistory();
+    this.currentDocumentInkCanvas()?.recordHistory();
     layer.name = name;
     this.handleDocumentChange(this.document as AnnotationDocument);
   }
@@ -714,7 +809,7 @@ export class PdfAnnotationView extends ItemView {
     if (!layer) {
       return;
     }
-    this.currentInkCanvas()?.recordHistory();
+    this.currentDocumentInkCanvas()?.recordHistory();
     layer.visible = !layer.visible;
     this.handleDocumentChange(this.document as AnnotationDocument);
   }
@@ -738,7 +833,7 @@ export class PdfAnnotationView extends ItemView {
       return;
     }
 
-    this.currentInkCanvas()?.recordHistory();
+    this.currentDocumentInkCanvas()?.recordHistory();
     const [layer] = this.document.layers.splice(index, 1);
     this.document.layers.splice(target, 0, layer);
     this.handleDocumentChange(this.document);

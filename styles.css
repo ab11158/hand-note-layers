@@ -47,6 +47,52 @@
   color: var(--text-on-accent);
 }
 
+.hand-note-tool-menu-wrap {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 3px;
+}
+
+.hand-note-eraser-menu {
+  align-items: center;
+  background: var(--background-modifier-hover);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  display: none;
+  flex: 0 0 auto;
+  gap: 2px;
+  padding: 2px;
+}
+
+.hand-note-eraser-menu.is-open {
+  display: flex;
+}
+
+.hand-note-eraser-option {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: var(--text-normal);
+  display: flex;
+  gap: 8px;
+  min-height: 32px;
+  padding: 5px 7px;
+  white-space: nowrap;
+}
+
+.hand-note-eraser-option:hover,
+.hand-note-eraser-option.is-active {
+  background: var(--background-modifier-hover);
+  color: var(--text-accent);
+}
+
+.hand-note-eraser-option svg {
+  height: 17px;
+  width: 17px;
+}
+
 .hand-note-color {
   background: transparent;
   border: 1px solid var(--background-modifier-border);
@@ -191,6 +237,134 @@
 
 .hand-note-selection-menu.is-visible {
   display: flex;
+}
+
+.hand-note-whiteboard {
+  background: #ffffff;
+  border: 1px solid var(--background-modifier-border);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.2);
+  overflow: visible;
+  position: absolute;
+  touch-action: none;
+  z-index: 9;
+}
+
+.hand-note-whiteboard.is-editing {
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 1px var(--interactive-accent), 0 8px 28px rgba(0, 0, 0, 0.2);
+}
+
+.hand-note-whiteboard-content {
+  background: #ffffff;
+  height: 100%;
+  inset: 0;
+  overflow: hidden;
+  position: absolute;
+  width: 100%;
+}
+
+.hand-note-whiteboard-surface {
+  background: #ffffff;
+  left: 0;
+  position: absolute;
+  top: 0;
+  transform-origin: 0 0;
+}
+
+.hand-note-whiteboard-controls {
+  align-items: center;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  box-shadow: var(--shadow-s);
+  display: none;
+  gap: 2px;
+  left: 50%;
+  padding: 3px;
+  position: absolute;
+  top: 6px;
+  transform: translateX(-50%);
+  z-index: 16;
+}
+
+.hand-note-whiteboard.is-editing .hand-note-whiteboard-controls {
+  display: flex;
+}
+
+.hand-note-whiteboard-move {
+  cursor: move;
+}
+
+.hand-note-whiteboard-handle {
+  appearance: none;
+  background: #ffffff;
+  border: 2px solid var(--interactive-accent);
+  display: none;
+  height: 14px;
+  margin: 0;
+  padding: 0;
+  position: absolute;
+  touch-action: none;
+  width: 14px;
+  z-index: 17;
+}
+
+.hand-note-whiteboard.is-editing .hand-note-whiteboard-handle {
+  display: block;
+}
+
+.hand-note-whiteboard-handle.is-nw,
+.hand-note-whiteboard-handle.is-n,
+.hand-note-whiteboard-handle.is-ne {
+  top: -7px;
+}
+
+.hand-note-whiteboard-handle.is-sw,
+.hand-note-whiteboard-handle.is-s,
+.hand-note-whiteboard-handle.is-se {
+  bottom: -7px;
+}
+
+.hand-note-whiteboard-handle.is-nw,
+.hand-note-whiteboard-handle.is-w,
+.hand-note-whiteboard-handle.is-sw {
+  left: -7px;
+}
+
+.hand-note-whiteboard-handle.is-ne,
+.hand-note-whiteboard-handle.is-e,
+.hand-note-whiteboard-handle.is-se {
+  right: -7px;
+}
+
+.hand-note-whiteboard-handle.is-n,
+.hand-note-whiteboard-handle.is-s {
+  left: calc(50% - 7px);
+}
+
+.hand-note-whiteboard-handle.is-w,
+.hand-note-whiteboard-handle.is-e {
+  top: calc(50% - 7px);
+}
+
+.hand-note-whiteboard-handle.is-nw,
+.hand-note-whiteboard-handle.is-se {
+  cursor: nwse-resize;
+}
+
+.hand-note-whiteboard-handle.is-ne,
+.hand-note-whiteboard-handle.is-sw {
+  cursor: nesw-resize;
+}
+
+.hand-note-whiteboard-handle.is-n,
+.hand-note-whiteboard-handle.is-s {
+  cursor: ns-resize;
+}
+
+.hand-note-whiteboard-handle.is-w,
+.hand-note-whiteboard-handle.is-e {
+  cursor: ew-resize;
 }
 
 .hand-note-pdf-scroll {

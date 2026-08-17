@@ -6,6 +6,8 @@ export type AnnotationTool =
   | "eraser"
   | "select";
 
+export type EraserMode = "partial" | "stroke";
+
 export interface StrokePoint {
   x: number;
   y: number;

@@ -3,6 +3,7 @@ import {
   AnnotationLayer,
   AnnotationStroke,
   AnnotationTool,
+  EraserMode,
   StrokePoint,
   generateId,
   getActiveLayer
@@ -24,12 +25,14 @@ export interface InkCanvasOptions {
   getColor: () => string;
   getSize: () => number;
   getEraserSize: () => number;
+  getEraserMode: () => EraserMode;
   getPressureEnabled: () => boolean;
-  getFingerDrawingEnabled: () => boolean;
   onDocumentChange: (document: AnnotationDocument, renderCanvas?: boolean) => void;
   onInteraction?: (
     type: "stroke-start" | "stroke-end" | "erase" | "selection-delete"
   ) => void;
+  onActivate?: () => void;
+  onFingerPan?: (deltaX: number, deltaY: number) => void;
   onPencilShortcut?: () => void;
   pageIndex?: number;
 }
@@ -52,6 +55,7 @@ export class InkCanvas {
   private readonly selectionOverlay: SelectionOverlay;
   private activeStroke: AnnotationStroke | null = null;
   private activePointerId: number | null = null;
+  private activePointerKind: "draw" | "pan" | null = null;
   private activeTool: AnnotationTool | null = null;
   private eraserChanged = false;
   private undoStack: AnnotationDocument[] = [];
@@ -64,6 +68,12 @@ export class InkCanvas {
   private viewport: InkCanvasViewport | null = null;
   private renderedPointCount = 0;
   private pendingEraserPoints: StrokePoint[] = [];
+  private panLastX = 0;
+  private panLastY = 0;
+  private panLastTime = 0;
+  private panVelocityX = 0;
+  private panVelocityY = 0;
+  private panInertiaFrame: number | null = null;
   private lassoPoints: StrokePoint[] = [];
   private selectedStrokeIds = new Set<string>();
   private selectedLayerId: string | null = null;
@@ -102,6 +112,7 @@ export class InkCanvas {
     this.canvas.addEventListener("pointermove", this.handlePointerMove);
     this.canvas.addEventListener("pointerup", this.handlePointerUp);
     this.canvas.addEventListener("pointercancel", this.handlePointerUp);
+    this.canvas.addEventListener("lostpointercapture", this.handleLostPointerCapture);
     this.updateInputMode();
 
     if (typeof ResizeObserver !== "undefined") {
@@ -117,6 +128,7 @@ export class InkCanvas {
     this.canvas.removeEventListener("pointermove", this.handlePointerMove);
     this.canvas.removeEventListener("pointerup", this.handlePointerUp);
     this.canvas.removeEventListener("pointercancel", this.handlePointerUp);
+    this.canvas.removeEventListener("lostpointercapture", this.handleLostPointerCapture);
     this.observer?.disconnect();
     this.selectionOutline.remove();
     this.selectionMenu.remove();
@@ -126,11 +138,13 @@ export class InkCanvas {
     if (this.resizeFrame !== null) {
       window.cancelAnimationFrame(this.resizeFrame);
     }
+    this.stopPanInertia();
   }
 
   setDocument(_document: AnnotationDocument): void {
     this.activeStroke = null;
     this.activePointerId = null;
+    this.activePointerKind = null;
     this.activeTool = null;
     this.eraserChanged = false;
     this.activeRect = null;
@@ -144,13 +158,11 @@ export class InkCanvas {
 
   updateInputMode(): void {
     const tool = this.options.getTool();
-    const fingerDrawingEnabled = this.options.getFingerDrawingEnabled();
     if (tool !== "select" && this.hasSelection()) {
       this.cancelSelection();
     }
-    this.canvas.style.pointerEvents = tool === "hand" ? "none" : "auto";
-    this.canvas.style.touchAction =
-      fingerDrawingEnabled && tool !== "select" ? "none" : "pan-x pan-y";
+    this.canvas.style.pointerEvents = "auto";
+    this.canvas.style.touchAction = "none";
     this.canvas.style.cursor =
       tool === "eraser" ? "cell" : tool === "hand" ? "grab" : "crosshair";
   }
@@ -184,13 +196,13 @@ export class InkCanvas {
   }
 
   syncInteractionGeometry(): void {
-    if (this.activePointerId !== null) {
+    if (this.activePointerKind === "draw") {
       this.activeRect = this.canvas.getBoundingClientRect();
     }
   }
 
   isInteracting(): boolean {
-    return this.activePointerId !== null;
+    return this.activePointerKind === "draw";
   }
 
   hasSelection(): boolean {
@@ -426,11 +438,22 @@ export class InkCanvas {
       return;
     }
 
-    const tool = this.options.getTool();
-    if (tool === "hand") {
+    this.stopPanInertia();
+    if (event.pointerType === "touch") {
+      event.preventDefault();
+      this.canvas.setPointerCapture(event.pointerId);
+      this.activePointerId = event.pointerId;
+      this.activePointerKind = "pan";
+      this.panLastX = event.clientX;
+      this.panLastY = event.clientY;
+      this.panLastTime = event.timeStamp || performance.now();
+      this.panVelocityX = 0;
+      this.panVelocityY = 0;
       return;
     }
-    if (event.pointerType === "touch" && !this.options.getFingerDrawingEnabled()) {
+
+    const tool = this.options.getTool();
+    if (tool === "hand") {
       return;
     }
     if (this.isStylusShortcut(event)) {
@@ -448,7 +471,9 @@ export class InkCanvas {
     event.preventDefault();
     this.canvas.setPointerCapture(event.pointerId);
     this.activePointerId = event.pointerId;
+    this.activePointerKind = "draw";
     this.activeTool = tool;
+    this.options.onActivate?.();
     this.activeRect = this.canvas.getBoundingClientRect();
     this.activeViewport = this.currentViewport(this.activeRect);
     this.ensureCanvasReady(this.activeRect);
@@ -496,6 +521,20 @@ export class InkCanvas {
     }
 
     event.preventDefault();
+    if (this.activePointerKind === "pan") {
+      const deltaX = this.panLastX - event.clientX;
+      const deltaY = this.panLastY - event.clientY;
+      const now = event.timeStamp || performance.now();
+      const elapsed = Math.max(1, now - this.panLastTime);
+      const frameScale = 16 / elapsed;
+      this.panVelocityX = this.panVelocityX * 0.65 + deltaX * frameScale * 0.35;
+      this.panVelocityY = this.panVelocityY * 0.65 + deltaY * frameScale * 0.35;
+      this.panLastX = event.clientX;
+      this.panLastY = event.clientY;
+      this.panLastTime = now;
+      this.options.onFingerPan?.(deltaX, deltaY);
+      return;
+    }
     if (this.activeTool === "select") {
       this.collectLassoPoints(event);
       this.scheduleInteractionFrame();
@@ -522,6 +561,20 @@ export class InkCanvas {
 
     event.preventDefault();
 
+    if (this.activePointerKind === "pan") {
+      const pointerId = event.pointerId;
+      const velocityX = this.panVelocityX;
+      const velocityY = this.panVelocityY;
+      this.resetPointerState();
+      if (this.canvas.hasPointerCapture(pointerId)) {
+        this.canvas.releasePointerCapture(pointerId);
+      }
+      if (event.type === "pointerup") {
+        this.startPanInertia(velocityX, velocityY);
+      }
+      return;
+    }
+
     if (this.activeTool === "select") {
       this.collectLassoPoints(event, true);
     } else if (this.activeTool === "eraser") {
@@ -530,10 +583,6 @@ export class InkCanvas {
       this.collectStrokePoints(event, true);
     }
     this.flushPendingInteraction();
-
-    if (this.canvas.hasPointerCapture(event.pointerId)) {
-      this.canvas.releasePointerCapture(event.pointerId);
-    }
 
     if (this.activeTool === "select") {
       this.finalizeLasso();
@@ -552,13 +601,55 @@ export class InkCanvas {
       this.options.onDocumentChange(document, this.needsLayerOrderRefresh(document));
     }
 
+    const pointerId = event.pointerId;
+    this.resetPointerState();
+    if (this.canvas.hasPointerCapture(pointerId)) {
+      this.canvas.releasePointerCapture(pointerId);
+    }
+  };
+
+  private handleLostPointerCapture = (event: PointerEvent): void => {
+    if (event.pointerId !== this.activePointerId) {
+      return;
+    }
+    this.handlePointerUp(event);
+  };
+
+  private resetPointerState(): void {
     this.activePointerId = null;
+    this.activePointerKind = null;
     this.activeTool = null;
     this.activeRect = null;
     this.activeViewport = null;
     this.renderedPointCount = 0;
     this.pendingEraserPoints = [];
-  };
+  }
+
+  private startPanInertia(velocityX: number, velocityY: number): void {
+    if (!this.options.onFingerPan) {
+      return;
+    }
+    let currentX = velocityX;
+    let currentY = velocityY;
+    const step = (): void => {
+      currentX *= 0.92;
+      currentY *= 0.92;
+      if (Math.abs(currentX) < 0.18 && Math.abs(currentY) < 0.18) {
+        this.panInertiaFrame = null;
+        return;
+      }
+      this.options.onFingerPan?.(currentX, currentY);
+      this.panInertiaFrame = window.requestAnimationFrame(step);
+    };
+    this.panInertiaFrame = window.requestAnimationFrame(step);
+  }
+
+  private stopPanInertia(): void {
+    if (this.panInertiaFrame !== null) {
+      window.cancelAnimationFrame(this.panInertiaFrame);
+      this.panInertiaFrame = null;
+    }
+  }
 
   private eraseAtPoint(layer: AnnotationLayer, point: StrokePoint): boolean {
     const eraserRadius = this.options.getEraserSize() / 2;
@@ -572,13 +663,76 @@ export class InkCanvas {
       ) {
         continue;
       }
-      if (this.strokeHitTest(stroke, point, eraserRadius)) {
+      if (!this.strokeHitTest(stroke, point, eraserRadius)) {
+        continue;
+      }
+      if (this.options.getEraserMode() === "stroke") {
         layer.strokes.splice(index, 1);
         removed = true;
+        continue;
       }
+      const fragments = this.eraseStrokePart(stroke, point, eraserRadius);
+      layer.strokes.splice(index, 1, ...fragments);
+      removed = true;
     }
 
     return removed;
+  }
+
+  private eraseStrokePart(
+    stroke: AnnotationStroke,
+    point: StrokePoint,
+    radius: number
+  ): AnnotationStroke[] {
+    const rect = this.activeRect ?? this.canvas.getBoundingClientRect();
+    const viewport = this.activeViewport ?? this.currentViewport(rect);
+    const eraseX = point.x * viewport.documentWidth;
+    const eraseY = point.y * viewport.documentHeight;
+    const fragments: StrokePoint[][] = [];
+    let current: StrokePoint[] = [];
+
+    const finishFragment = (): void => {
+      if (current.length > 0) {
+        fragments.push(current);
+        current = [];
+      }
+    };
+    const pointDistance = (candidate: StrokePoint): number => {
+      const dx = candidate.x * viewport.documentWidth - eraseX;
+      const dy = candidate.y * viewport.documentHeight - eraseY;
+      return Math.sqrt(dx * dx + dy * dy);
+    };
+
+    for (let index = 0; index < stroke.points.length; index += 1) {
+      const candidate = stroke.points[index];
+      const previous = index > 0 ? stroke.points[index - 1] : null;
+      const segmentHit = previous
+        ? this.distanceToSegment(
+            eraseX,
+            eraseY,
+            previous.x * viewport.documentWidth,
+            previous.y * viewport.documentHeight,
+            candidate.x * viewport.documentWidth,
+            candidate.y * viewport.documentHeight
+          ) <= radius
+        : false;
+      const candidateHit = pointDistance(candidate) <= radius;
+      if (candidateHit || segmentHit) {
+        finishFragment();
+        if (!candidateHit && segmentHit) {
+          current.push(candidate);
+        }
+        continue;
+      }
+      current.push(candidate);
+    }
+    finishFragment();
+
+    return fragments.map((points) => ({
+      ...stroke,
+      id: generateId(),
+      points
+    }));
   }
 
   private isStylusShortcut(event: PointerEvent): boolean {
