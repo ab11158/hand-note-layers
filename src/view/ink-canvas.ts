@@ -841,6 +841,10 @@ export class InkCanvas {
         this.activeRect,
         this.activeViewport
       );
+      const lastPoint = this.activeStroke.points[this.activeStroke.points.length - 1];
+      if (this.isInvalidOriginJump(samples[index], point, lastPoint)) {
+        continue;
+      }
       if (force && samples[index].pressure === 0) {
         point.pressure =
           this.activeStroke.points[this.activeStroke.points.length - 1].pressure;
@@ -876,6 +880,9 @@ export class InkCanvas {
     for (const sample of this.coalescedEvents(event)) {
       const point = this.pointFromEvent(sample, this.activeRect, this.activeViewport);
       const last = this.pendingEraserPoints[this.pendingEraserPoints.length - 1];
+      if (this.isInvalidOriginJump(sample, point, last)) {
+        continue;
+      }
       if (last) {
         const dx = (point.x - last.x) * this.activeViewport.documentWidth;
         const dy = (point.y - last.y) * this.activeViewport.documentHeight;
@@ -889,7 +896,60 @@ export class InkCanvas {
 
   private coalescedEvents(event: PointerEvent): PointerEvent[] {
     const samples = event.getCoalescedEvents?.();
-    return samples && samples.length > 0 ? samples : [event];
+    if (!samples || samples.length === 0) {
+      return this.hasUsableCoordinates(event) ? [event] : [];
+    }
+
+    const usable = samples.filter(
+      (sample) =>
+        this.hasUsableCoordinates(sample) &&
+        !(
+          sample.clientX === 0 &&
+          sample.clientY === 0 &&
+          (event.clientX !== 0 || event.clientY !== 0)
+        )
+    );
+    if (this.hasUsableCoordinates(event)) {
+      const last = usable[usable.length - 1];
+      if (!last || last.clientX !== event.clientX || last.clientY !== event.clientY) {
+        usable.push(event);
+      }
+    }
+    return usable;
+  }
+
+  private hasUsableCoordinates(event: PointerEvent): boolean {
+    if (!Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) {
+      return false;
+    }
+    const rect = this.activeRect;
+    if (!rect) {
+      return true;
+    }
+    const tolerance = 2;
+    return (
+      event.clientX >= rect.left - tolerance &&
+      event.clientX <= rect.left + rect.width + tolerance &&
+      event.clientY >= rect.top - tolerance &&
+      event.clientY <= rect.top + rect.height + tolerance
+    );
+  }
+
+  private isInvalidOriginJump(
+    event: PointerEvent,
+    point: StrokePoint,
+    previous: StrokePoint | undefined
+  ): boolean {
+    if (!previous || event.clientX !== 0 || event.clientY !== 0) {
+      return false;
+    }
+    const viewport = this.activeViewport;
+    if (!viewport) {
+      return false;
+    }
+    const dx = (point.x - previous.x) * viewport.documentWidth;
+    const dy = (point.y - previous.y) * viewport.documentHeight;
+    return dx * dx + dy * dy > 64 * 64;
   }
 
   private collectLassoPoints(event: PointerEvent, forceLastPoint = false): void {
@@ -904,6 +964,9 @@ export class InkCanvas {
         this.activeViewport
       );
       const last = this.lassoPoints[this.lassoPoints.length - 1];
+      if (this.isInvalidOriginJump(samples[index], point, last)) {
+        continue;
+      }
       if (last) {
         const dx = (point.x - last.x) * this.activeViewport.documentWidth;
         const dy = (point.y - last.y) * this.activeViewport.documentHeight;
