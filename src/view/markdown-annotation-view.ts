@@ -16,7 +16,7 @@ import {
   saveAnnotation
 } from "../storage/annotation-store";
 import { AnnotationToolbar } from "./annotation-toolbar";
-import { InkCanvas } from "./ink-canvas";
+import { InkCanvas, InkCanvasViewport } from "./ink-canvas";
 import { LayerPanel } from "./layer-panel";
 
 export const MARKDOWN_ANNOTATION_VIEW_TYPE = "hand-note-markdown-annotation";
@@ -29,7 +29,12 @@ export class MarkdownAnnotationView extends ItemView {
   private annotationToolbar: AnnotationToolbar | null = null;
   private markdownBody: HTMLDivElement;
   private surface: HTMLDivElement;
+  private scrollContainer: HTMLDivElement;
   private saveTimer: number | null = null;
+  private workspaceTimer: number | null = null;
+  private workspaceFrame: number | null = null;
+  private surfaceObserver: ResizeObserver | null = null;
+  private workspaceViewport: InkCanvasViewport | null = null;
   private currentTool: AnnotationTool = "pen";
   private previousDrawingTool: AnnotationTool = "pen";
   private currentColor = "#2563eb";
@@ -38,7 +43,8 @@ export class MarkdownAnnotationView extends ItemView {
     pen: 4,
     pencil: 3,
     highlighter: 18,
-    eraser: 28
+    eraser: 28,
+    select: 4
   };
   private pressureEnabled = true;
   private fingerDrawingEnabled = false;
@@ -128,6 +134,8 @@ export class MarkdownAnnotationView extends ItemView {
     });
     this.contentEl.append(this.layerPanel.element);
 
+    await this.renderMarkdown();
+
     this.inkCanvas = new InkCanvas({
       getDocument: () => this.document as AnnotationDocument,
       getTool: () => this.currentTool,
@@ -145,9 +153,18 @@ export class MarkdownAnnotationView extends ItemView {
       },
       onPencilShortcut: () => this.togglePenAndEraser()
     });
-    this.surface.append(this.inkCanvas.canvas);
-
-    await this.renderMarkdown();
+    this.surface.append(
+      this.inkCanvas.canvas,
+      this.inkCanvas.selectionOutline,
+      this.inkCanvas.selectionMenu
+    );
+    if (typeof ResizeObserver !== "undefined") {
+      this.surfaceObserver = new ResizeObserver(() =>
+        this.scheduleWorkspaceUpdate(true)
+      );
+      this.surfaceObserver.observe(this.surface);
+    }
+    this.updateWorkspace(true);
   }
 
   private async releaseCurrentFile(): Promise<void> {
@@ -157,7 +174,21 @@ export class MarkdownAnnotationView extends ItemView {
     }
     await this.flushSave();
     this.inkCanvas?.destroy();
+    this.surfaceObserver?.disconnect();
+    this.surfaceObserver = null;
+    if (this.workspaceTimer !== null) {
+      window.clearTimeout(this.workspaceTimer);
+      this.workspaceTimer = null;
+    }
+    if (this.workspaceFrame !== null) {
+      window.cancelAnimationFrame(this.workspaceFrame);
+      this.workspaceFrame = null;
+    }
+    if (this.scrollContainer) {
+      this.scrollContainer.removeEventListener("scroll", this.handleMarkdownScroll);
+    }
     this.inkCanvas = null;
+    this.workspaceViewport = null;
     this.layerPanel = null;
     this.annotationToolbar = null;
     this.document = null;
@@ -198,8 +229,11 @@ export class MarkdownAnnotationView extends ItemView {
   }
 
   private buildMarkdownSurface(): void {
-    const scrollContainer = document.createElement("div");
-    scrollContainer.className = "hand-note-scroll";
+    this.scrollContainer = document.createElement("div");
+    this.scrollContainer.className = "hand-note-scroll";
+    this.scrollContainer.addEventListener("scroll", this.handleMarkdownScroll, {
+      passive: true
+    });
 
     this.surface = document.createElement("div");
     this.surface.className = "hand-note-surface";
@@ -207,8 +241,8 @@ export class MarkdownAnnotationView extends ItemView {
     this.markdownBody = document.createElement("div");
     this.markdownBody.className = "hand-note-markdown-body markdown-preview-view";
     this.surface.append(this.markdownBody);
-    scrollContainer.append(this.surface);
-    this.contentEl.append(scrollContainer);
+    this.scrollContainer.append(this.surface);
+    this.contentEl.append(this.scrollContainer);
   }
 
   private async renderMarkdown(): Promise<void> {
@@ -225,11 +259,11 @@ export class MarkdownAnnotationView extends ItemView {
       this.sourceFile.path,
       this
     );
-    this.inkCanvas?.render();
+    this.updateWorkspace(true);
   }
 
   private setTool(tool: AnnotationTool): void {
-    if (tool !== "hand" && tool !== "eraser") {
+    if (tool !== "hand" && tool !== "eraser" && tool !== "select") {
       this.previousDrawingTool = tool;
     }
     this.currentTool = tool;
@@ -385,5 +419,131 @@ export class MarkdownAnnotationView extends ItemView {
 
   private toggleLayerPanel(open: boolean): void {
     this.layerPanel?.element.classList.toggle("is-open", open);
+  }
+
+  private handleMarkdownScroll = (): void => {
+    if (this.workspaceFrame === null) {
+      this.workspaceFrame = window.requestAnimationFrame(() => {
+        this.workspaceFrame = null;
+        this.inkCanvas?.syncInteractionGeometry();
+        if (this.viewportOutsideWorkspace()) {
+          this.updateWorkspace(true);
+        }
+      });
+    }
+    if (this.workspaceTimer !== null) {
+      window.clearTimeout(this.workspaceTimer);
+    }
+    this.workspaceTimer = window.setTimeout(() => {
+      this.workspaceTimer = null;
+      this.updateWorkspace(false);
+    }, 140);
+  };
+
+  private scheduleWorkspaceUpdate(force: boolean): void {
+    if (this.workspaceFrame !== null) {
+      window.cancelAnimationFrame(this.workspaceFrame);
+    }
+    this.workspaceFrame = window.requestAnimationFrame(() => {
+      this.workspaceFrame = null;
+      this.updateWorkspace(force);
+    });
+  }
+
+  private updateWorkspace(force: boolean): void {
+    const inkCanvas = this.inkCanvas;
+    if (!inkCanvas || !this.surface || !this.scrollContainer) {
+      return;
+    }
+    if (inkCanvas.isInteracting()) {
+      if (this.workspaceTimer === null) {
+        this.workspaceTimer = window.setTimeout(() => {
+          this.workspaceTimer = null;
+          this.updateWorkspace(force);
+        }, 80);
+      }
+      return;
+    }
+
+    const visible = this.visibleSurfaceRange();
+    const current = this.workspaceViewport;
+    const threshold = visible.height * 0.25;
+    const dimensionsChanged =
+      !current ||
+      Math.abs(current.documentWidth - visible.documentWidth) > 1 ||
+      Math.abs(current.documentHeight - visible.documentHeight) > 1;
+    const nearBoundary =
+      !current ||
+      visible.top < current.offsetY + threshold ||
+      visible.bottom > current.offsetY + current.height - threshold;
+    if (!force && !dimensionsChanged && !nearBoundary) {
+      return;
+    }
+
+    const workspaceHeight = Math.min(
+      visible.documentHeight,
+      Math.max(visible.height * 3, visible.height + 512)
+    );
+    const maxTop = Math.max(0, visible.documentHeight - workspaceHeight);
+    let offsetY = Math.max(
+      0,
+      Math.min(maxTop, visible.top - (workspaceHeight - visible.height) / 2)
+    );
+    offsetY = Math.max(0, Math.min(maxTop, Math.floor(offsetY / 256) * 256));
+
+    const next: InkCanvasViewport = {
+      documentWidth: visible.documentWidth,
+      documentHeight: visible.documentHeight,
+      offsetX: 0,
+      offsetY,
+      width: visible.documentWidth,
+      height: workspaceHeight
+    };
+    if (
+      current &&
+      !dimensionsChanged &&
+      Math.abs(next.offsetY - current.offsetY) < Math.max(256, visible.height * 0.5)
+    ) {
+      return;
+    }
+    this.workspaceViewport = next;
+    inkCanvas.setViewport(next);
+  }
+
+  private viewportOutsideWorkspace(): boolean {
+    const current = this.workspaceViewport;
+    if (!current || !this.surface || !this.scrollContainer) {
+      return true;
+    }
+    const visible = this.visibleSurfaceRange();
+    return (
+      visible.top < current.offsetY ||
+      visible.bottom > current.offsetY + current.height
+    );
+  }
+
+  private visibleSurfaceRange(): {
+    top: number;
+    bottom: number;
+    height: number;
+    documentWidth: number;
+    documentHeight: number;
+  } {
+    const scrollRect = this.scrollContainer.getBoundingClientRect();
+    const surfaceRect = this.surface.getBoundingClientRect();
+    const documentWidth = Math.max(1, this.surface.clientWidth);
+    const documentHeight = Math.max(1, this.surface.scrollHeight);
+    const top = Math.max(0, Math.min(documentHeight, scrollRect.top - surfaceRect.top));
+    const bottom = Math.max(
+      top,
+      Math.min(documentHeight, scrollRect.bottom - surfaceRect.top)
+    );
+    return {
+      top,
+      bottom,
+      height: Math.max(1, Math.min(documentHeight, bottom - top)),
+      documentWidth,
+      documentHeight
+    };
   }
 }

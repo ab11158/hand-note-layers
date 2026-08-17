@@ -71,7 +71,8 @@ export class PdfAnnotationView extends ItemView {
     pen: 4,
     pencil: 3,
     highlighter: 18,
-    eraser: 28
+    eraser: 28,
+    select: 4
   };
   private pressureEnabled = true;
   private fingerDrawingEnabled = false;
@@ -437,7 +438,11 @@ export class PdfAnnotationView extends ItemView {
       inkCanvas.restoreHistoryState(history);
     }
     this.inkCanvases.set(pageIndex, inkCanvas);
-    pageEl.append(inkCanvas.canvas);
+    pageEl.append(
+      inkCanvas.canvas,
+      inkCanvas.selectionOutline,
+      inkCanvas.selectionMenu
+    );
     inkCanvas.render();
   }
 
@@ -540,6 +545,9 @@ export class PdfAnnotationView extends ItemView {
     }
     this.scrollFrame = window.requestAnimationFrame(() => {
       this.scrollFrame = null;
+      for (const inkCanvas of this.inkCanvases.values()) {
+        inkCanvas.syncInteractionGeometry();
+      }
       const containerRect = this.scrollContainer.getBoundingClientRect();
       const center = containerRect.top + containerRect.height / 2;
       let closestPage = this.currentPage;
@@ -577,7 +585,7 @@ export class PdfAnnotationView extends ItemView {
   }
 
   private setTool(tool: AnnotationTool): void {
-    if (tool !== "hand" && tool !== "eraser") {
+    if (tool !== "hand" && tool !== "eraser" && tool !== "select") {
       this.previousDrawingTool = tool;
     }
     this.currentTool = tool;

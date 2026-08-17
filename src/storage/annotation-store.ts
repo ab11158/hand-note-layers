@@ -106,7 +106,7 @@ export async function saveAnnotation(
 ): Promise<void> {
   const path = getAnnotationPath(source);
   document.updatedAt = Date.now();
-  const snapshot = JSON.stringify(document, null, 2);
+  const snapshot = JSON.stringify(document);
   const previous = saveQueues.get(path) ?? Promise.resolve();
   const next = previous
     .catch(() => undefined)

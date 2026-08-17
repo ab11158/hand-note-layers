@@ -1,4 +1,10 @@
-export type AnnotationTool = "hand" | "pen" | "pencil" | "highlighter" | "eraser";
+export type AnnotationTool =
+  | "hand"
+  | "pen"
+  | "pencil"
+  | "highlighter"
+  | "eraser"
+  | "select";
 
 export interface StrokePoint {
   x: number;

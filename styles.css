@@ -149,6 +149,50 @@
   cursor: crosshair;
 }
 
+.hand-note-selection-overlay {
+  height: 100%;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+  position: absolute;
+  width: 100%;
+  z-index: 4;
+}
+
+.hand-note-selection-overlay:not(.is-visible) {
+  display: none;
+}
+
+.hand-note-selection-path,
+.hand-note-selection-bounds {
+  fill: rgba(37, 99, 235, 0.08);
+  stroke: var(--interactive-accent);
+  stroke-dasharray: 7 5;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.hand-note-selection-bounds {
+  fill: transparent;
+}
+
+.hand-note-selection-menu {
+  align-items: center;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  box-shadow: var(--shadow-s);
+  display: none;
+  gap: 2px;
+  padding: 3px;
+  position: absolute;
+  z-index: 6;
+}
+
+.hand-note-selection-menu.is-visible {
+  display: flex;
+}
+
 .hand-note-pdf-scroll {
   background: var(--background-secondary);
 }

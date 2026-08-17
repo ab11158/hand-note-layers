@@ -34,7 +34,8 @@ const TOOL_CONFIG: Array<{
   { tool: "pen", icon: "pen-tool", label: "钢笔" },
   { tool: "pencil", icon: "pencil", label: "铅笔" },
   { tool: "highlighter", icon: "highlighter", label: "荧光笔" },
-  { tool: "eraser", icon: "eraser", label: "整笔橡皮擦" }
+  { tool: "eraser", icon: "eraser", label: "整笔橡皮擦" },
+  { tool: "select", icon: "lasso-select", label: "套索选择" }
 ];
 
 const COLOR_PRESETS = [
@@ -74,7 +75,7 @@ export class AnnotationToolbar {
     }
 
     const historyGroup = this.createGroup();
-    const undoButton = createIconButton("undo-2", "撤销");
+    const undoButton = createIconButton("undo-2", "撤回上一步操作");
     undoButton.addEventListener("click", options.onUndo);
     const redoButton = createIconButton("redo-2", "重做");
     redoButton.addEventListener("click", options.onRedo);
@@ -178,9 +179,10 @@ export class AnnotationToolbar {
     }
 
     const isHand = tool === "hand";
+    const isSelection = tool === "select";
     const isEraser = tool === "eraser";
     const isHighlighter = tool === "highlighter";
-    this.sizeControl.setDisabled(isHand);
+    this.sizeControl.setDisabled(isHand || isSelection);
     this.sizeControl.setLabel(isEraser ? "橡皮" : "粗细");
     this.sizeControl.setRange(
       isEraser ? 8 : 1,
