@@ -9,6 +9,7 @@ import {
   AnnotationDocument,
   AnnotationTool,
   EraserMode,
+  SelectionMode,
   createLayer,
   getActiveLayer
 } from "../model/annotation";
@@ -53,6 +54,7 @@ export class MarkdownAnnotationView extends ItemView {
   private pressureEnabled = true;
   private pencilShortcutEnabled = true;
   private eraserMode: EraserMode = "partial";
+  private selectionMode: SelectionMode = "free";
 
   constructor(leaf: WorkspaceLeaf) {
     super(leaf);
@@ -147,9 +149,10 @@ export class MarkdownAnnotationView extends ItemView {
       getSize: () => this.toolSizes[this.currentTool],
       getEraserSize: () => this.toolSizes.eraser,
       getEraserMode: () => this.eraserMode,
+      getSelectionMode: () => this.selectionMode,
       getPressureEnabled: () => this.pressureEnabled,
       onDocumentChange: (next, renderCanvas) =>
-        this.handleDocumentChange(next, renderCanvas),
+        this.handleDocumentChange(next, renderCanvas, false),
       onActivate: () => {
         this.activeInkTarget = "document";
         this.whiteboard?.setEditing(false);
@@ -178,6 +181,9 @@ export class MarkdownAnnotationView extends ItemView {
       this.surfaceObserver.observe(this.surface);
     }
     this.updateWorkspace(true);
+    if (this.document.draftWhiteboards?.length) {
+      window.requestAnimationFrame(() => this.toggleWhiteboard());
+    }
   }
 
   private async releaseCurrentFile(): Promise<void> {
@@ -217,6 +223,7 @@ export class MarkdownAnnotationView extends ItemView {
       initialPressureEnabled: this.pressureEnabled,
       initialPencilShortcutEnabled: this.pencilShortcutEnabled,
       initialEraserMode: this.eraserMode,
+      initialSelectionMode: this.selectionMode,
       getSize: (tool) => this.toolSizes[tool],
       onToolChange: (tool) => this.setTool(tool),
       onColorChange: (color) => this.setColor(color),
@@ -233,6 +240,9 @@ export class MarkdownAnnotationView extends ItemView {
       },
       onEraserModeChange: (mode) => {
         this.eraserMode = mode;
+      },
+      onSelectionModeChange: (mode) => {
+        this.selectionMode = mode;
       },
       onWhiteboard: () => this.toggleWhiteboard(),
       onUndo: () => this.currentInkCanvas()?.undo(),
@@ -288,8 +298,6 @@ export class MarkdownAnnotationView extends ItemView {
     this.annotationToolbar?.setTool(tool);
     this.inkCanvas?.updateInputMode();
     this.whiteboard?.updateInputMode();
-    this.whiteboard?.setEditing(false);
-    this.annotationToolbar?.setWhiteboardActive(false);
   }
 
   private setColor(color: string): void {
@@ -308,10 +316,13 @@ export class MarkdownAnnotationView extends ItemView {
 
   private handleDocumentChange(
     document: AnnotationDocument,
-    renderCanvas = true
+    renderCanvas = true,
+    syncLayers = true
   ): void {
     this.document = document;
-    this.layerPanel?.setDocument(document);
+    if (syncLayers) {
+      this.layerPanel?.setDocument(document);
+    }
     if (renderCanvas) {
       this.inkCanvas?.render();
     }
@@ -325,7 +336,7 @@ export class MarkdownAnnotationView extends ItemView {
     this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;
       void this.flushSave();
-    }, 350);
+    }, 1000);
   }
 
   private cancelScheduledSave(): void {
@@ -468,6 +479,7 @@ export class MarkdownAnnotationView extends ItemView {
     );
     this.whiteboard = new TemporaryWhiteboard({
       host: this.surface,
+      initialDraft: this.document?.draftWhiteboards?.[0],
       initialBounds: {
         left: Math.max(0, (visible.documentWidth - width) / 2),
         top: Math.max(0, top),
@@ -483,6 +495,8 @@ export class MarkdownAnnotationView extends ItemView {
       onActivate: () => {
         this.activeInkTarget = "whiteboard";
       },
+      onChange: (draft) => this.updateWhiteboardDraft(draft),
+      onSave: (layer, draft) => this.saveWhiteboardLayer(layer, draft.id),
       onDelete: () => this.deleteWhiteboard(),
       onPencilShortcut: () => this.togglePenAndEraser()
     });
@@ -491,10 +505,55 @@ export class MarkdownAnnotationView extends ItemView {
   }
 
   private deleteWhiteboard(): void {
+    const draftId = this.whiteboard?.getDraft().id;
+    this.whiteboard?.destroy();
+    this.whiteboard = null;
+    if (draftId && this.document) {
+      this.document.draftWhiteboards = (this.document.draftWhiteboards ?? []).filter(
+        (draft) => draft.id !== draftId
+      );
+      this.handleDocumentChange(this.document, false);
+    }
+    this.activeInkTarget = "document";
+    this.annotationToolbar?.setWhiteboardActive(false);
+  }
+
+  private updateWhiteboardDraft(draft: ReturnType<TemporaryWhiteboard["getDraft"]>): void {
+    if (!this.document) {
+      return;
+    }
+    const drafts = this.document.draftWhiteboards ?? [];
+    const index = drafts.findIndex((item) => item.id === draft.id);
+    if (index >= 0) {
+      drafts[index] = draft;
+    } else {
+      drafts.push(draft);
+    }
+    this.document.draftWhiteboards = drafts;
+    this.handleDocumentChange(this.document, false, false);
+  }
+
+  private saveWhiteboardLayer(
+    layer: ReturnType<TemporaryWhiteboard["createLayer"]>,
+    draftId: string
+  ): void {
+    if (!this.document) {
+      return;
+    }
+    this.inkCanvas?.recordHistory();
+    const number =
+      this.document.layers.filter((item) => /^白板\d+$/.test(item.name)).length + 1;
+    layer.name = `白板${number}`;
+    this.document.layers.push(layer);
+    this.document.activeLayerId = layer.id;
+    this.document.draftWhiteboards = (this.document.draftWhiteboards ?? []).filter(
+      (draft) => draft.id !== draftId
+    );
     this.whiteboard?.destroy();
     this.whiteboard = null;
     this.activeInkTarget = "document";
     this.annotationToolbar?.setWhiteboardActive(false);
+    this.handleDocumentChange(this.document);
   }
 
   private handleMarkdownScroll = (): void => {

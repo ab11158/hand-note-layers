@@ -4,6 +4,7 @@ import {
   AnnotationStroke,
   AnnotationTool,
   EraserMode,
+  SelectionMode,
   StrokePoint,
   generateId,
   getActiveLayer
@@ -26,6 +27,7 @@ export interface InkCanvasOptions {
   getSize: () => number;
   getEraserSize: () => number;
   getEraserMode: () => EraserMode;
+  getSelectionMode?: () => SelectionMode;
   getPressureEnabled: () => boolean;
   onDocumentChange: (document: AnnotationDocument, renderCanvas?: boolean) => void;
   onInteraction?: (
@@ -236,6 +238,41 @@ export class InkCanvas {
     this.options.onDocumentChange(document);
   }
 
+  selectAll(): void {
+    const layer = getActiveLayer(this.options.getDocument());
+    const strokes = layer.strokes.filter(
+      (stroke) =>
+        this.options.pageIndex === undefined ||
+        stroke.pageIndex === this.options.pageIndex
+    );
+    if (strokes.length === 0) {
+      this.cancelSelection();
+      return;
+    }
+    this.selectedLayerId = layer.id;
+    this.selectedStrokeIds = new Set(strokes.map((stroke) => stroke.id));
+    this.selectionBounds = strokes.reduce<SelectionBounds | null>(
+      (bounds, stroke) => this.unionBounds(bounds, this.getStrokeBounds(stroke)),
+      null
+    );
+    if (!this.selectionBounds) {
+      return;
+    }
+    this.lassoPoints = [
+      { x: this.selectionBounds.minX, y: this.selectionBounds.minY, pressure: 0.5 },
+      { x: this.selectionBounds.maxX, y: this.selectionBounds.minY, pressure: 0.5 },
+      { x: this.selectionBounds.maxX, y: this.selectionBounds.maxY, pressure: 0.5 },
+      { x: this.selectionBounds.minX, y: this.selectionBounds.maxY, pressure: 0.5 }
+    ];
+    const viewport = this.currentViewport(this.canvas.getBoundingClientRect());
+    this.selectionOverlay.setSelection(
+      this.lassoPoints,
+      this.selectionBounds,
+      viewport.documentWidth,
+      viewport.documentHeight
+    );
+  }
+
   resetHistory(): void {
     this.undoStack = [];
     this.redoStack = [];
@@ -327,7 +364,27 @@ export class InkCanvas {
         continue;
       }
 
+      this.context.save();
       this.context.globalAlpha = layer.opacity;
+      if (layer.whiteboard) {
+        const bounds = layer.whiteboard.bounds;
+        if (
+          bounds.pageIndex !== undefined &&
+          this.options.pageIndex !== bounds.pageIndex
+        ) {
+          this.context.restore();
+          continue;
+        }
+        const left = bounds.minX * viewport.documentWidth - viewport.offsetX;
+        const top = bounds.minY * viewport.documentHeight - viewport.offsetY;
+        const width = (bounds.maxX - bounds.minX) * viewport.documentWidth;
+        const height = (bounds.maxY - bounds.minY) * viewport.documentHeight;
+        this.context.beginPath();
+        this.context.rect(left, top, width, height);
+        this.context.clip();
+        this.context.fillStyle = layer.whiteboard.background;
+        this.context.fillRect(left, top, width, height);
+      }
       for (const stroke of layer.strokes) {
         if (this.options.pageIndex !== undefined && stroke.pageIndex !== this.options.pageIndex) {
           continue;
@@ -337,6 +394,7 @@ export class InkCanvas {
         }
         this.drawStroke(stroke, viewport, layer.opacity);
       }
+      this.context.restore();
     }
 
     this.context.globalAlpha = 1;
@@ -485,9 +543,24 @@ export class InkCanvas {
       this.activeRect,
       this.activeViewport
     );
+    if (layer.whiteboard && !this.pointInBounds(point, layer.whiteboard.bounds)) {
+      this.resetPointerState();
+      if (this.canvas.hasPointerCapture(event.pointerId)) {
+        this.canvas.releasePointerCapture(event.pointerId);
+      }
+      return;
+    }
 
     if (tool === "select") {
       this.cancelSelection();
+      if (this.options.getSelectionMode?.() === "all") {
+        this.selectAll();
+        this.resetPointerState();
+        if (this.canvas.hasPointerCapture(event.pointerId)) {
+          this.canvas.releasePointerCapture(event.pointerId);
+        }
+        return;
+      }
       this.lassoPoints = [point];
       this.updateLassoDraft();
       return;
@@ -978,6 +1051,17 @@ export class InkCanvas {
         current.y * viewport.documentHeight - viewport.offsetY
       );
       context.stroke();
+      if (stroke.tool !== "highlighter") {
+        context.beginPath();
+        context.arc(
+          current.x * viewport.documentWidth - viewport.offsetX,
+          current.y * viewport.documentHeight - viewport.offsetY,
+          context.lineWidth / 2,
+          0,
+          Math.PI * 2
+        );
+        context.fill();
+      }
     }
     context.restore();
   }
@@ -1111,6 +1195,21 @@ export class InkCanvas {
       return;
     }
     const samples = this.coalescedEvents(event);
+    if (this.options.getSelectionMode?.() === "rectangle") {
+      const sample = samples[samples.length - 1];
+      const start = this.lassoPoints[0];
+      if (!sample || !start) {
+        return;
+      }
+      const current = this.pointFromEvent(sample, this.activeRect, this.activeViewport);
+      this.lassoPoints = [
+        start,
+        { ...start, x: current.x },
+        current,
+        { ...current, x: start.x }
+      ];
+      return;
+    }
     for (let index = 0; index < samples.length; index += 1) {
       const point = this.pointFromEvent(
         samples[index],
@@ -1307,6 +1406,15 @@ export class InkCanvas {
       first.minX > second.maxX ||
       first.maxY < second.minY ||
       first.minY > second.maxY
+    );
+  }
+
+  private pointInBounds(point: StrokePoint, bounds: SelectionBounds): boolean {
+    return (
+      point.x >= bounds.minX &&
+      point.x <= bounds.maxX &&
+      point.y >= bounds.minY &&
+      point.y <= bounds.maxY
     );
   }
 

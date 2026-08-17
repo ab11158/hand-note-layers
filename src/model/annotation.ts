@@ -7,6 +7,15 @@ export type AnnotationTool =
   | "select";
 
 export type EraserMode = "partial" | "stroke";
+export type SelectionMode = "all" | "rectangle" | "free";
+
+export interface AnnotationBounds {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+  pageIndex?: number;
+}
 
 export interface StrokePoint {
   x: number;
@@ -30,6 +39,25 @@ export interface AnnotationLayer {
   visible: boolean;
   opacity: number;
   strokes: AnnotationStroke[];
+  whiteboard?: {
+    bounds: AnnotationBounds;
+    background: string;
+  };
+}
+
+export interface WhiteboardDraft {
+  id: string;
+  name: string;
+  bounds: { left: number; top: number; width: number; height: number };
+  hostWidth: number;
+  hostHeight: number;
+  virtualWidth: number;
+  virtualHeight: number;
+  panX: number;
+  panY: number;
+  pageIndex?: number;
+  strokes: AnnotationStroke[];
+  updatedAt: number;
 }
 
 export interface AnnotationDocument {
@@ -38,6 +66,7 @@ export interface AnnotationDocument {
   layers: AnnotationLayer[];
   activeLayerId: string;
   updatedAt: number;
+  draftWhiteboards?: WhiteboardDraft[];
 }
 
 export function generateId(): string {
@@ -55,7 +84,8 @@ export function createEmptyDocument(sourcePath: string): AnnotationDocument {
     sourcePath,
     layers: [layer],
     activeLayerId: layer.id,
-    updatedAt: Date.now()
+    updatedAt: Date.now(),
+    draftWhiteboards: []
   };
 }
 

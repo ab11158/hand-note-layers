@@ -1,5 +1,5 @@
 import { setIcon } from "obsidian";
-import { AnnotationTool, EraserMode } from "../model/annotation";
+import { AnnotationTool, EraserMode, SelectionMode } from "../model/annotation";
 import { createIconButton, createLabeledSlider, createToolbar } from "./ui";
 
 export type AnnotationSaveStatus = "saved" | "saving" | "error";
@@ -10,6 +10,7 @@ export interface AnnotationToolbarOptions {
   initialPressureEnabled: boolean;
   initialPencilShortcutEnabled: boolean;
   initialEraserMode: EraserMode;
+  initialSelectionMode: SelectionMode;
   getSize: (tool: AnnotationTool) => number;
   onToolChange: (tool: AnnotationTool) => void;
   onColorChange: (color: string) => void;
@@ -17,6 +18,7 @@ export interface AnnotationToolbarOptions {
   onPressureChange: (enabled: boolean) => void;
   onPencilShortcutChange: (enabled: boolean) => void;
   onEraserModeChange: (mode: EraserMode) => void;
+  onSelectionModeChange: (mode: SelectionMode) => void;
   onWhiteboard: () => void;
   onUndo: () => void;
   onRedo: () => void;
@@ -39,14 +41,8 @@ const TOOL_CONFIG: Array<{
   { tool: "select", icon: "lasso-select", label: "套索选择" }
 ];
 
-const COLOR_PRESETS = [
-  "#1f2937",
-  "#2563eb",
-  "#dc2626",
-  "#16a34a",
-  "#9333ea",
-  "#f59e0b"
-];
+const FIXED_COLOR_PRESETS = ["#dc2626", "#2563eb", "#16a34a"];
+const CUSTOM_COLOR_PRESETS = ["#1f2937", "#9333ea", "#f59e0b"];
 
 export class AnnotationToolbar {
   readonly element: HTMLDivElement;
@@ -59,6 +55,8 @@ export class AnnotationToolbar {
   private readonly pencilShortcutButton: HTMLButtonElement;
   private readonly eraserMenu: HTMLDivElement;
   private readonly eraserModeButtons = new Map<EraserMode, HTMLButtonElement>();
+  private readonly selectionMenu: HTMLDivElement;
+  private readonly selectionModeButtons = new Map<SelectionMode, HTMLButtonElement>();
   private readonly whiteboardButton: HTMLButtonElement;
   private readonly saveButton: HTMLButtonElement;
   private readonly saveStatus: HTMLSpanElement;
@@ -68,6 +66,13 @@ export class AnnotationToolbar {
     this.options = options;
     this.currentTool = options.initialTool;
     this.element = createToolbar();
+    this.selectionMenu = document.createElement("div");
+    this.selectionMenu.className = "hand-note-eraser-menu";
+    this.selectionMenu.append(
+      this.createSelectionModeButton("all", "全选", "scan"),
+      this.createSelectionModeButton("rectangle", "框选", "box-select"),
+      this.createSelectionModeButton("free", "自由套索", "lasso-select")
+    );
 
     const toolGroup = this.createGroup();
     for (const config of TOOL_CONFIG) {
@@ -75,6 +80,10 @@ export class AnnotationToolbar {
       button.addEventListener("click", () => {
         if (config.tool === "eraser" && this.currentTool === "eraser") {
           this.eraserMenu.classList.toggle("is-open");
+          return;
+        }
+        if (config.tool === "select" && this.currentTool === "select") {
+          this.selectionMenu.classList.toggle("is-open");
           return;
         }
         this.eraserMenu.classList.remove("is-open");
@@ -91,6 +100,11 @@ export class AnnotationToolbar {
           this.createEraserModeButton("stroke", "整笔擦除", "delete")
         );
         wrapper.append(button, this.eraserMenu);
+        toolGroup.append(wrapper);
+      } else if (config.tool === "select") {
+        const wrapper = document.createElement("div");
+        wrapper.className = "hand-note-tool-menu-wrap";
+        wrapper.append(button, this.selectionMenu);
         toolGroup.append(wrapper);
       } else {
         toolGroup.append(button);
@@ -110,7 +124,7 @@ export class AnnotationToolbar {
     historyGroup.append(undoButton, redoButton, clearButton);
 
     const colorGroup = this.createGroup("hand-note-color-group");
-    for (const color of COLOR_PRESETS) {
+    for (const color of FIXED_COLOR_PRESETS) {
       const swatch = document.createElement("button");
       swatch.type = "button";
       swatch.className = "hand-note-color-swatch";
@@ -118,6 +132,15 @@ export class AnnotationToolbar {
       swatch.setAttribute("aria-label", `颜色 ${color}`);
       swatch.addEventListener("click", () => options.onColorChange(color));
       this.colorButtons.set(color, swatch);
+      colorGroup.append(swatch);
+    }
+    for (const color of CUSTOM_COLOR_PRESETS) {
+      const swatch = document.createElement("input");
+      swatch.type = "color";
+      swatch.value = color;
+      swatch.className = "hand-note-color-swatch is-custom";
+      swatch.setAttribute("aria-label", "自定义预设颜色");
+      swatch.addEventListener("input", () => options.onColorChange(swatch.value));
       colorGroup.append(swatch);
     }
 
@@ -165,16 +188,20 @@ export class AnnotationToolbar {
     layerButton.addEventListener("click", options.onLayers);
     documentGroup.append(this.saveButton, this.saveStatus, layerButton);
 
-    this.element.append(toolGroup, this.createDivider(), historyGroup);
+    this.element.append(
+      toolGroup,
+      this.createDivider(),
+      colorGroup,
+      this.sizeControl.element,
+      this.createDivider(),
+      historyGroup
+    );
     if (options.navigationControls?.length) {
       const navigationGroup = this.createGroup();
       navigationGroup.append(...options.navigationControls);
       this.element.append(this.createDivider(), navigationGroup);
     }
     this.element.append(
-      this.createDivider(),
-      colorGroup,
-      this.sizeControl.element,
       this.createDivider(),
       inputGroup,
       this.createDivider(),
@@ -186,6 +213,7 @@ export class AnnotationToolbar {
     this.setPressureEnabled(options.initialPressureEnabled);
     this.setPencilShortcutEnabled(options.initialPencilShortcutEnabled);
     this.setEraserMode(options.initialEraserMode);
+    this.setSelectionMode(options.initialSelectionMode);
     this.setSaveStatus("saved");
   }
 
@@ -193,6 +221,9 @@ export class AnnotationToolbar {
     this.currentTool = tool;
     if (tool !== "eraser") {
       this.eraserMenu.classList.remove("is-open");
+    }
+    if (tool !== "select") {
+      this.selectionMenu.classList.remove("is-open");
     }
     for (const [candidate, button] of this.toolButtons) {
       button.classList.toggle("is-active", candidate === tool);
@@ -238,6 +269,13 @@ export class AnnotationToolbar {
       "aria-label",
       mode === "partial" ? "橡皮擦：局部擦除" : "橡皮擦：整笔擦除"
     );
+  }
+
+  setSelectionMode(mode: SelectionMode): void {
+    for (const [candidate, button] of this.selectionModeButtons) {
+      button.classList.toggle("is-active", candidate === mode);
+      button.setAttribute("aria-pressed", String(candidate === mode));
+    }
   }
 
   setWhiteboardActive(active: boolean): void {
@@ -291,6 +329,29 @@ export class AnnotationToolbar {
       this.eraserMenu.classList.remove("is-open");
     });
     this.eraserModeButtons.set(mode, button);
+    return button;
+  }
+
+  private createSelectionModeButton(
+    mode: SelectionMode,
+    label: string,
+    icon: string
+  ): HTMLButtonElement {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "hand-note-eraser-option";
+    button.setAttribute("aria-label", label);
+    setIcon(button, icon);
+    const text = document.createElement("span");
+    text.textContent = label;
+    button.append(text);
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.options.onSelectionModeChange(mode);
+      this.setSelectionMode(mode);
+      this.selectionMenu.classList.remove("is-open");
+    });
+    this.selectionModeButtons.set(mode, button);
     return button;
   }
 

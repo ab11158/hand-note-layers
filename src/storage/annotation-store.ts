@@ -56,6 +56,7 @@ function migrateDocument(value: unknown, sourcePath: string): AnnotationDocument
       name: layer.name,
       visible: layer.visible ?? true,
       opacity: layer.opacity ?? 1,
+      whiteboard: layer.whiteboard,
       strokes: Array.isArray(layer.strokes)
         ? layer.strokes.map((stroke) => ({
             id: stroke.id,
@@ -76,7 +77,10 @@ function migrateDocument(value: unknown, sourcePath: string): AnnotationDocument
         : []
     })),
     activeLayerId: candidate.activeLayerId ?? candidate.layers[0]?.id ?? "",
-    updatedAt: candidate.updatedAt ?? Date.now()
+    updatedAt: candidate.updatedAt ?? Date.now(),
+    draftWhiteboards: Array.isArray(candidate.draftWhiteboards)
+      ? candidate.draftWhiteboards
+      : []
   };
 }
 

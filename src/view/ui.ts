@@ -39,15 +39,22 @@ export function createLabeledSlider(
   const text = document.createElement("span");
   text.textContent = label;
 
+  const valueText = document.createElement("output");
+  valueText.className = "hand-note-slider-value";
+  valueText.textContent = String(value);
+
   const input = document.createElement("input");
   input.type = "range";
   input.min = String(min);
   input.max = String(max);
   input.step = String(step);
   input.value = String(value);
-  input.addEventListener("input", () => onChange(Number(input.value)));
+  input.addEventListener("input", () => {
+    valueText.textContent = input.value;
+    onChange(Number(input.value));
+  });
 
-  wrapper.append(text, input);
+  wrapper.append(text, input, valueText);
   return {
     element: wrapper,
     input,
@@ -65,6 +72,7 @@ export function createLabeledSlider(
     },
     setValue: (nextValue) => {
       input.value = String(nextValue);
+      valueText.textContent = String(nextValue);
     }
   };
 }

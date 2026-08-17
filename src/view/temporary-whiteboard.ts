@@ -1,9 +1,12 @@
 import { setIcon } from "obsidian";
 import {
   AnnotationDocument,
+  AnnotationLayer,
   AnnotationTool,
   EraserMode,
-  createEmptyDocument
+  WhiteboardDraft,
+  createEmptyDocument,
+  generateId
 } from "../model/annotation";
 import { InkCanvas, InkCanvasViewport } from "./ink-canvas";
 
@@ -17,6 +20,8 @@ export interface WhiteboardBounds {
 export interface TemporaryWhiteboardOptions {
   host: HTMLElement;
   initialBounds: WhiteboardBounds;
+  initialDraft?: WhiteboardDraft;
+  pageIndex?: number;
   getTool: () => AnnotationTool;
   getColor: () => string;
   getSize: () => number;
@@ -24,6 +29,8 @@ export interface TemporaryWhiteboardOptions {
   getEraserMode: () => EraserMode;
   getPressureEnabled: () => boolean;
   onActivate: () => void;
+  onChange?: (draft: WhiteboardDraft) => void;
+  onSave?: (layer: AnnotationLayer, draft: WhiteboardDraft) => void;
   onDelete: () => void;
   onPencilShortcut?: () => void;
 }
@@ -43,6 +50,9 @@ export class TemporaryWhiteboard {
   private panX: number;
   private panY: number;
   private viewportFrame: number | null = null;
+  private readonly draftId: string;
+  private readonly draftName: string;
+  private readonly pageIndex?: number;
   private manipulation:
     | {
         pointerId: number;
@@ -55,12 +65,29 @@ export class TemporaryWhiteboard {
 
   constructor(options: TemporaryWhiteboardOptions) {
     this.options = options;
-    this.bounds = this.clampBounds(options.initialBounds);
-    this.virtualWidth = Math.max(1600, Math.round(this.bounds.width * 3));
-    this.virtualHeight = Math.max(2200, Math.round(this.bounds.height * 3));
-    this.panX = Math.max(0, (this.virtualWidth - this.bounds.width) / 2);
-    this.panY = Math.max(0, (this.virtualHeight - this.bounds.height) / 2);
+    const draft = options.initialDraft;
+    this.draftId = draft?.id ?? generateId();
+    this.draftName = draft?.name ?? "临时白板";
+    this.pageIndex = options.pageIndex ?? draft?.pageIndex;
+    const hostWidth = Math.max(1, options.host.clientWidth);
+    const hostHeight = Math.max(1, options.host.scrollHeight);
+    const restoredBounds = draft
+      ? {
+          left: (draft.bounds.left / draft.hostWidth) * hostWidth,
+          top: (draft.bounds.top / draft.hostHeight) * hostHeight,
+          width: (draft.bounds.width / draft.hostWidth) * hostWidth,
+          height: (draft.bounds.height / draft.hostHeight) * hostHeight
+        }
+      : options.initialBounds;
+    this.bounds = this.clampBounds(restoredBounds);
+    this.virtualWidth = draft?.virtualWidth ?? Math.max(1600, Math.round(this.bounds.width * 3));
+    this.virtualHeight = draft?.virtualHeight ?? Math.max(2200, Math.round(this.bounds.height * 3));
+    this.panX = draft?.panX ?? Math.max(0, (this.virtualWidth - this.bounds.width) / 2);
+    this.panY = draft?.panY ?? Math.max(0, (this.virtualHeight - this.bounds.height) / 2);
     this.document = createEmptyDocument("temporary-whiteboard");
+    if (draft) {
+      this.document.layers[0].strokes = draft.strokes;
+    }
 
     this.element = document.createElement("div");
     this.element.className = "hand-note-whiteboard is-editing";
@@ -86,6 +113,7 @@ export class TemporaryWhiteboard {
       getPressureEnabled: options.getPressureEnabled,
       onDocumentChange: (next) => {
         this.document = next;
+        this.options.onChange?.(this.getDraft());
       },
       onActivate: options.onActivate,
       onFingerPan: (deltaX, deltaY) => {
@@ -135,6 +163,53 @@ export class TemporaryWhiteboard {
     this.scheduleViewportUpdate();
   }
 
+  getDraft(pageIndex = this.pageIndex): WhiteboardDraft {
+    return {
+      id: this.draftId,
+      name: this.draftName,
+      bounds: { ...this.bounds },
+      hostWidth: Math.max(1, this.options.host.clientWidth),
+      hostHeight: Math.max(1, this.options.host.scrollHeight),
+      virtualWidth: this.virtualWidth,
+      virtualHeight: this.virtualHeight,
+      panX: this.panX,
+      panY: this.panY,
+      pageIndex,
+      strokes: this.document.layers[0].strokes,
+      updatedAt: Date.now()
+    };
+  }
+
+  createLayer(name: string, pageIndex?: number): AnnotationLayer {
+    const hostWidth = Math.max(1, this.options.host.clientWidth);
+    const hostHeight = Math.max(1, this.options.host.scrollHeight);
+    const bounds = {
+      minX: this.bounds.left / hostWidth,
+      minY: this.bounds.top / hostHeight,
+      maxX: (this.bounds.left + this.bounds.width) / hostWidth,
+      maxY: (this.bounds.top + this.bounds.height) / hostHeight,
+      pageIndex
+    };
+    const strokes = this.document.layers[0].strokes.map((stroke) => ({
+      ...stroke,
+      id: generateId(),
+      pageIndex,
+      points: stroke.points.map((point) => ({
+        ...point,
+        x: (this.bounds.left + point.x * this.virtualWidth - this.panX) / hostWidth,
+        y: (this.bounds.top + point.y * this.virtualHeight - this.panY) / hostHeight
+      }))
+    }));
+    return {
+      id: generateId(),
+      name,
+      visible: true,
+      opacity: 1,
+      strokes,
+      whiteboard: { bounds, background: "#ffffff" }
+    };
+  }
+
   private createControls(): HTMLDivElement {
     const controls = document.createElement("div");
     controls.className = "hand-note-whiteboard-controls";
@@ -146,9 +221,14 @@ export class TemporaryWhiteboard {
     );
     const resetButton = this.createControlButton("locate-fixed", "回到白板中心");
     resetButton.addEventListener("click", () => this.resetPan());
+    const saveButton = this.createControlButton("save", "保存为白板图层");
+    saveButton.addEventListener("click", () => {
+      const draft = this.getDraft();
+      this.options.onSave?.(this.createLayer(draft.name, draft.pageIndex), draft);
+    });
     const deleteButton = this.createControlButton("trash-2", "删除临时白板");
     deleteButton.addEventListener("click", this.options.onDelete);
-    controls.append(moveButton, resetButton, deleteButton);
+    controls.append(moveButton, resetButton, saveButton, deleteButton);
     return controls;
   }
 
@@ -238,6 +318,7 @@ export class TemporaryWhiteboard {
     window.removeEventListener("pointerup", this.handleManipulationEnd);
     window.removeEventListener("pointercancel", this.handleManipulationEnd);
     this.scheduleViewportUpdate();
+    this.options.onChange?.(this.getDraft());
   };
 
   private panBy(deltaX: number, deltaY: number): void {
@@ -279,6 +360,7 @@ export class TemporaryWhiteboard {
       height
     };
     this.inkCanvas.setViewport(viewport);
+    this.options.onChange?.(this.getDraft());
   }
 
   private applyBounds(): void {

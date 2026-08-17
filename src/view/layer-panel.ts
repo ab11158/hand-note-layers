@@ -32,20 +32,16 @@ export class LayerPanel {
     title.className = "hand-note-layer-title";
     title.textContent = "笔记层";
 
+    const addButton = createIconButton("plus", "新增笔记层");
+    addButton.addEventListener("click", () => callbacks.onAddLayer());
     const closeButton = createIconButton("x", "关闭层面板");
     closeButton.addEventListener("click", () => callbacks.onClose());
 
-    header.append(title, closeButton);
+    header.append(title, addButton, closeButton);
     this.list = document.createElement("div");
     this.list.className = "hand-note-layer-list";
 
-    const footer = document.createElement("div");
-    footer.className = "hand-note-layer-footer";
-    const addButton = createIconButton("plus", "新增笔记层");
-    addButton.addEventListener("click", () => callbacks.onAddLayer());
-    footer.append(addButton);
-
-    this.element.append(header, this.list, footer);
+    this.element.append(header, this.list);
     this.render();
   }
 
@@ -70,6 +66,7 @@ export class LayerPanel {
     row.classList.toggle("is-hidden", !layer.visible);
 
     const visibilityButton = createIconButton(layer.visible ? "eye" : "eye-off", layer.visible ? "隐藏图层" : "显示图层");
+    visibilityButton.classList.toggle("is-active", layer.visible);
     visibilityButton.addEventListener("click", () => this.callbacks.onToggleVisibility(layer.id));
 
     const content = document.createElement("div");
@@ -124,11 +121,15 @@ export class LayerPanel {
     deleteButton.disabled = this.annotationDocument.layers.length <= 1;
     deleteButton.addEventListener("click", () => this.callbacks.onDeleteLayer(layer.id));
 
-    const renameButton = createIconButton("pencil", "重命名图层");
-    renameButton.addEventListener("click", startRename);
+    const editButton = createIconButton("pen", "设为当前编辑图层");
+    editButton.classList.toggle(
+      "is-active",
+      layer.id === this.annotationDocument.activeLayerId
+    );
+    editButton.addEventListener("click", () => this.callbacks.onSelectLayer(layer.id));
 
     content.append(name, opacity);
-    row.append(visibilityButton, content, renameButton, moveUp, moveDown, deleteButton);
+    row.append(visibilityButton, content, editButton, moveUp, moveDown, deleteButton);
     return row;
   }
 }
