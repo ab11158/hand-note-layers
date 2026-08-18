@@ -49,8 +49,15 @@ export interface InkInputDiagnostic {
   time: number;
   pointerId?: number;
   pointerType?: string;
+  eventTimestamp?: number;
+  arrivalLagMs?: number;
   firstInkMs?: number;
   interStrokeMs?: number;
+  firstMoveMs?: number;
+  frameMs?: number;
+  durationMs?: number;
+  moveCount?: number;
+  target?: string;
   detail?: string;
 }
 
@@ -67,7 +74,7 @@ export class InkCanvas {
   private static readonly MAX_CANVAS_PIXELS = 12_000_000;
   private static readonly MAX_CANVAS_DIMENSION = 16_384;
   private static readonly MAX_LASSO_POINTS = 192;
-  private static readonly MAX_INPUT_DIAGNOSTICS = 240;
+  private static readonly MAX_INPUT_DIAGNOSTICS = 600;
 
   readonly canvas: HTMLCanvasElement;
   readonly selectionOutline: SVGSVGElement;
@@ -86,6 +93,8 @@ export class InkCanvas {
   private observer: ResizeObserver | null = null;
   private interactionFrame: number | null = null;
   private resizeFrame: number | null = null;
+  private readonly diagnosticFrames = new Set<number>();
+  private diagnosticObserver: PerformanceObserver | null = null;
   private activeRect: DOMRect | null = null;
   private cachedRect: DOMRect | null = null;
   private activeViewport: InkCanvasViewport | null = null;
@@ -105,6 +114,8 @@ export class InkCanvas {
     checkLayerOrder: boolean;
   } | null = null;
   private strokeStartedAt = 0;
+  private activeFirstMoveAt: number | null = null;
+  private activeMoveCount = 0;
   private activeStrokeLayerId: string | null = null;
   private activeStrokeLayerOpacity = 1;
   private activeStrokeIndex = -1;
@@ -149,14 +160,20 @@ export class InkCanvas {
     this.selectionOutline = this.selectionOverlay.outline;
     this.selectionMenu = this.selectionOverlay.menu;
 
+    this.canvas.addEventListener("pointerdown", this.handleCanvasPointerDownCapture, true);
     this.canvas.addEventListener("pointerdown", this.handlePointerDown);
     this.canvas.addEventListener("pointermove", this.handlePointerMove);
     this.canvas.addEventListener("pointerup", this.handlePointerUp);
     this.canvas.addEventListener("pointercancel", this.handlePointerUp);
     this.canvas.addEventListener("lostpointercapture", this.handleLostPointerCapture);
+    this.canvas.addEventListener("gotpointercapture", this.handlePointerCaptureChange);
+    this.canvas.addEventListener("lostpointercapture", this.handlePointerCaptureChange);
+    window.addEventListener("pointerdown", this.handleWindowPointerDownCapture, true);
     window.addEventListener("pointerup", this.handlePointerUp);
     window.addEventListener("pointercancel", this.handlePointerUp);
+    document.addEventListener("pointerdown", this.handleDocumentPointerDownCapture, true);
     this.updateInputMode();
+    this.startPerformanceDiagnostics();
 
     if (typeof ResizeObserver !== "undefined") {
       this.observer = new ResizeObserver(() => this.scheduleResizeRender());
@@ -167,13 +184,19 @@ export class InkCanvas {
   }
 
   destroy(): void {
+    this.canvas.removeEventListener("pointerdown", this.handleCanvasPointerDownCapture, true);
     this.canvas.removeEventListener("pointerdown", this.handlePointerDown);
     this.canvas.removeEventListener("pointermove", this.handlePointerMove);
     this.canvas.removeEventListener("pointerup", this.handlePointerUp);
     this.canvas.removeEventListener("pointercancel", this.handlePointerUp);
     this.canvas.removeEventListener("lostpointercapture", this.handleLostPointerCapture);
+    this.canvas.removeEventListener("gotpointercapture", this.handlePointerCaptureChange);
+    this.canvas.removeEventListener("lostpointercapture", this.handlePointerCaptureChange);
+    window.removeEventListener("pointerdown", this.handleWindowPointerDownCapture, true);
     window.removeEventListener("pointerup", this.handlePointerUp);
     window.removeEventListener("pointercancel", this.handlePointerUp);
+    document.removeEventListener("pointerdown", this.handleDocumentPointerDownCapture, true);
+    this.diagnosticObserver?.disconnect();
     this.observer?.disconnect();
     this.selectionOutline.remove();
     this.selectionMenu.remove();
@@ -183,6 +206,10 @@ export class InkCanvas {
     if (this.resizeFrame !== null) {
       window.cancelAnimationFrame(this.resizeFrame);
     }
+    for (const frame of this.diagnosticFrames) {
+      window.cancelAnimationFrame(frame);
+    }
+    this.diagnosticFrames.clear();
     this.flushDocumentPublish();
     this.stopPanInertia();
   }
@@ -193,6 +220,8 @@ export class InkCanvas {
     this.activePointerKind = null;
     this.activeSimpleContact = false;
     this.activeTool = null;
+    this.activeFirstMoveAt = null;
+    this.activeMoveCount = 0;
     this.eraserChanged = false;
     this.activeRect = null;
     this.cachedRect = null;
@@ -591,8 +620,11 @@ export class InkCanvas {
       time: receivedAt,
       pointerId: event.pointerId,
       pointerType: event.pointerType,
+      eventTimestamp: event.timeStamp,
+      arrivalLagMs: this.eventArrivalLag(event, receivedAt),
       interStrokeMs:
-        this.lastStrokeEndedAt === null ? undefined : receivedAt - this.lastStrokeEndedAt
+        this.lastStrokeEndedAt === null ? undefined : receivedAt - this.lastStrokeEndedAt,
+      target: this.describeEventTarget(event.target)
     });
     if (this.activePointerId !== null) {
       if (event.pointerType !== "pen") {
@@ -658,6 +690,8 @@ export class InkCanvas {
     this.cachedRect = this.activeRect;
     this.activeViewport = this.currentViewport(this.activeRect);
     this.strokeStartedAt = receivedAt;
+    this.activeFirstMoveAt = null;
+    this.activeMoveCount = 0;
     this.ensureCanvasReady(this.activeRect);
     this.renderedPointCount = 0;
     this.pendingEraserPoints = [];
@@ -722,6 +756,7 @@ export class InkCanvas {
       firstInkMs: firstInkAt - receivedAt,
       detail: this.activeSimpleContact ? "simple-contact" : undefined
     });
+    this.schedulePresentationDiagnostics(event.pointerId, event.pointerType, firstInkAt);
   };
 
   private handlePointerMove = (event: PointerEvent): void => {
@@ -730,6 +765,21 @@ export class InkCanvas {
     }
 
     event.preventDefault();
+    if (this.activePointerKind === "draw") {
+      this.activeMoveCount += 1;
+      if (this.activeFirstMoveAt === null) {
+        this.activeFirstMoveAt = performance.now();
+        this.recordInputDiagnostic({
+          event: "first-move-received",
+          time: this.activeFirstMoveAt,
+          pointerId: event.pointerId,
+          pointerType: event.pointerType,
+          eventTimestamp: event.timeStamp,
+          arrivalLagMs: this.eventArrivalLag(event, this.activeFirstMoveAt),
+          firstMoveMs: this.activeFirstMoveAt - this.strokeStartedAt
+        });
+      }
+    }
     if (this.activePointerKind === "pan") {
       const deltaX = this.panLastX - event.clientX;
       const deltaY = this.panLastY - event.clientY;
@@ -777,7 +827,9 @@ export class InkCanvas {
       event: "pointerup-received",
       time: performance.now(),
       pointerId: event.pointerId,
-      pointerType: event.pointerType
+      pointerType: event.pointerType,
+      eventTimestamp: event.timeStamp,
+      arrivalLagMs: this.eventArrivalLag(event)
     });
 
     if (this.activePointerKind === "pan") {
@@ -852,6 +904,8 @@ export class InkCanvas {
     const layerId = this.activeStrokeLayerId ?? document.activeLayerId;
     const strokeIndex = Math.max(0, this.activeStrokeIndex);
     const pointerId = this.activePointerId;
+    const firstMoveAt = this.activeFirstMoveAt;
+    const moveCount = this.activeMoveCount;
     this.activeStroke = null;
     this.resetPointerState();
     if (pointerId !== null && this.canvas.hasPointerCapture(pointerId)) {
@@ -871,6 +925,11 @@ export class InkCanvas {
       time: endedAt,
       pointerId: pointerId ?? undefined,
       pointerType,
+      firstMoveMs:
+        firstMoveAt === null
+          ? undefined
+          : firstMoveAt - this.strokeStartedAt,
+      moveCount,
       detail: `${reason};duration:${Math.max(0, endedAt - this.strokeStartedAt).toFixed(2)}ms`
     });
     this.options.onInteraction?.("stroke-end");
@@ -1089,6 +1148,130 @@ export class InkCanvas {
       InkCanvas.MAX_INPUT_DIAGNOSTICS,
       this.inputDiagnosticCount + 1
     );
+  }
+
+  private handleWindowPointerDownCapture = (event: PointerEvent): void => {
+    this.recordPointerPhase("window-capture", event);
+  };
+
+  private handleDocumentPointerDownCapture = (event: PointerEvent): void => {
+    this.recordPointerPhase("document-capture", event);
+  };
+
+  private handleCanvasPointerDownCapture = (event: PointerEvent): void => {
+    this.recordPointerPhase("canvas-capture", event);
+  };
+
+  private handlePointerCaptureChange = (event: PointerEvent): void => {
+    if (event.pointerType !== "pen") {
+      return;
+    }
+    this.recordInputDiagnostic({
+      event: event.type,
+      time: performance.now(),
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      eventTimestamp: event.timeStamp,
+      arrivalLagMs: this.eventArrivalLag(event),
+      target: this.describeEventTarget(event.target)
+    });
+  };
+
+  private recordPointerPhase(phase: string, event: PointerEvent): void {
+    if (event.pointerType !== "pen") {
+      return;
+    }
+    const receivedAt = performance.now();
+    this.recordInputDiagnostic({
+      event: phase,
+      time: receivedAt,
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      eventTimestamp: event.timeStamp,
+      arrivalLagMs: this.eventArrivalLag(event, receivedAt),
+      target: this.describeEventTarget(event.target)
+    });
+  }
+
+  private eventArrivalLag(event: PointerEvent, receivedAt = performance.now()): number | undefined {
+    if (!Number.isFinite(event.timeStamp)) {
+      return undefined;
+    }
+    const lag =
+      event.timeStamp > 1_000_000_000_000
+        ? Date.now() - event.timeStamp
+        : receivedAt - event.timeStamp;
+    return Number.isFinite(lag) ? Math.round(lag * 1000) / 1000 : undefined;
+  }
+
+  private describeEventTarget(target: EventTarget | null): string | undefined {
+    if (!target || typeof target !== "object") {
+      return undefined;
+    }
+    const element = target as { tagName?: unknown; className?: unknown };
+    const tag = typeof element.tagName === "string" ? element.tagName.toLowerCase() : "target";
+    const className =
+      typeof element.className === "string"
+        ? element.className.trim().split(/\s+/).filter(Boolean).slice(0, 3).join(".")
+        : "";
+    return className ? `${tag}.${className}` : tag;
+  }
+
+  private schedulePresentationDiagnostics(
+    pointerId: number,
+    pointerType: string,
+    firstInkAt: number
+  ): void {
+    this.scheduleDiagnosticFrame(() => {
+      const firstFrameAt = performance.now();
+      this.recordInputDiagnostic({
+        event: "first-frame-after-ink",
+        time: firstFrameAt,
+        pointerId,
+        pointerType,
+        frameMs: firstFrameAt - firstInkAt
+      });
+      this.scheduleDiagnosticFrame(() => {
+        const postPaintAt = performance.now();
+        this.recordInputDiagnostic({
+          event: "second-frame-after-ink",
+          time: postPaintAt,
+          pointerId,
+          pointerType,
+          frameMs: postPaintAt - firstInkAt
+        });
+      });
+    });
+  }
+
+  private scheduleDiagnosticFrame(callback: () => void): void {
+    let frame = 0;
+    frame = window.requestAnimationFrame(() => {
+      this.diagnosticFrames.delete(frame);
+      callback();
+    });
+    this.diagnosticFrames.add(frame);
+  }
+
+  private startPerformanceDiagnostics(): void {
+    if (typeof PerformanceObserver === "undefined") {
+      return;
+    }
+    try {
+      this.diagnosticObserver = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          this.recordInputDiagnostic({
+            event: "long-task",
+            time: entry.startTime,
+            durationMs: entry.duration,
+            detail: entry.name
+          });
+        }
+      });
+      this.diagnosticObserver.observe({ entryTypes: ["longtask"] });
+    } catch {
+      this.diagnosticObserver = null;
+    }
   }
 
   private scheduleDocumentPublish(

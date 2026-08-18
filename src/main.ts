@@ -92,7 +92,11 @@ export default class HandNoteLayersPlugin extends Plugin {
           const diagnostics = JSON.stringify(
             {
               capturedAt: new Date().toISOString(),
+              pluginVersion: this.manifest.version,
               file: this.app.workspace.getActiveFile()?.path ?? null,
+              userAgent: navigator.userAgent,
+              devicePixelRatio: window.devicePixelRatio,
+              visibilityState: document.visibilityState,
               records: view.getInputDiagnostics()
             },
             null,
