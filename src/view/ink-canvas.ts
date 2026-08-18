@@ -67,6 +67,7 @@ export class InkCanvas {
   private static readonly MAX_CANVAS_PIXELS = 12_000_000;
   private static readonly MAX_CANVAS_DIMENSION = 16_384;
   private static readonly MAX_LASSO_POINTS = 192;
+  private static readonly MAX_INPUT_DIAGNOSTICS = 240;
 
   readonly canvas: HTMLCanvasElement;
   readonly selectionOutline: SVGSVGElement;
@@ -85,6 +86,7 @@ export class InkCanvas {
   private interactionFrame: number | null = null;
   private resizeFrame: number | null = null;
   private activeRect: DOMRect | null = null;
+  private cachedRect: DOMRect | null = null;
   private activeViewport: InkCanvasViewport | null = null;
   private viewport: InkCanvasViewport | null = null;
   private renderedPointCount = 0;
@@ -103,8 +105,15 @@ export class InkCanvas {
   } | null = null;
   private strokeStartedAt = 0;
   private activeStrokeLayerId: string | null = null;
+  private activeStrokeLayerOpacity = 1;
+  private activeStrokeIndex = -1;
+  private activeStrokeDocument: AnnotationDocument | null = null;
   private lastStrokeEndedAt: number | null = null;
-  private readonly inputDiagnostics: InkInputDiagnostic[] = [];
+  private readonly inputDiagnostics = new Array<InkInputDiagnostic>(
+    InkCanvas.MAX_INPUT_DIAGNOSTICS
+  );
+  private inputDiagnosticCount = 0;
+  private inputDiagnosticCursor = 0;
   private lassoPoints: StrokePoint[] = [];
   private selectedStrokeIds = new Set<string>();
   private selectedLayerId: string | null = null;
@@ -184,9 +193,11 @@ export class InkCanvas {
     this.activeTool = null;
     this.eraserChanged = false;
     this.activeRect = null;
+    this.cachedRect = null;
     this.activeViewport = null;
     this.renderedPointCount = 0;
     this.pendingEraserPoints = [];
+    this.clearActiveStrokeMetadata();
     this.cancelSelection();
     this.resetHistory();
     this.render();
@@ -232,8 +243,11 @@ export class InkCanvas {
   }
 
   syncInteractionGeometry(): void {
+    const rect = this.canvas.getBoundingClientRect();
+    this.cachedRect = rect;
     if (this.activePointerKind === "draw") {
-      this.activeRect = this.canvas.getBoundingClientRect();
+      this.activeRect = rect;
+      this.activeViewport = this.currentViewport(rect);
     }
   }
 
@@ -242,7 +256,13 @@ export class InkCanvas {
   }
 
   getInputDiagnostics(): InkInputDiagnostic[] {
-    return this.inputDiagnostics.slice();
+    if (this.inputDiagnosticCount < InkCanvas.MAX_INPUT_DIAGNOSTICS) {
+      return this.inputDiagnostics.slice(0, this.inputDiagnosticCount);
+    }
+    return [
+      ...this.inputDiagnostics.slice(this.inputDiagnosticCursor),
+      ...this.inputDiagnostics.slice(0, this.inputDiagnosticCursor)
+    ];
   }
 
   hasSelection(): boolean {
@@ -411,6 +431,7 @@ export class InkCanvas {
   render(): void {
     const canvas = this.canvas;
     const rect = canvas.getBoundingClientRect();
+    this.cachedRect = rect;
     if (rect.width === 0 || rect.height === 0) {
       return;
     }
@@ -631,14 +652,13 @@ export class InkCanvas {
     }
 
     event.preventDefault();
-    if (event.pointerType !== "pen") {
-      this.canvas.setPointerCapture(event.pointerId);
-    }
+    this.canvas.setPointerCapture(event.pointerId);
     this.activePointerId = event.pointerId;
     this.activePointerKind = "draw";
     this.activeTool = tool;
     this.options.onActivate?.();
-    this.activeRect = this.canvas.getBoundingClientRect();
+    this.activeRect = this.cachedRect ?? this.canvas.getBoundingClientRect();
+    this.cachedRect = this.activeRect;
     this.activeViewport = this.currentViewport(this.activeRect);
     this.strokeStartedAt = receivedAt;
     this.ensureCanvasReady(this.activeRect);
@@ -680,6 +700,7 @@ export class InkCanvas {
       return;
     }
 
+    this.activeStrokeIndex = layer.strokes.length;
     this.activeStroke = {
       id: generateId(),
       tool,
@@ -690,6 +711,8 @@ export class InkCanvas {
       pageIndex: this.options.pageIndex
     };
     this.activeStrokeLayerId = layer.id;
+    this.activeStrokeLayerOpacity = layer.opacity;
+    this.activeStrokeDocument = document;
     layer.strokes.push(this.activeStroke);
     this.options.onInteraction?.("stroke-start");
     this.flushInteractionFrame();
@@ -775,7 +798,6 @@ export class InkCanvas {
       this.collectEraserPoints(event);
     } else if (this.activeStroke) {
       this.collectStrokePoints(event, true);
-      this.flushPendingInteraction();
       this.finalizeActiveStroke("pointerup", event.pointerType);
       return;
     }
@@ -823,26 +845,24 @@ export class InkCanvas {
       return;
     }
     this.flushPendingInteraction();
-    const document = this.options.getDocument();
+    const document = this.activeStrokeDocument ?? this.options.getDocument();
     const layerId = this.activeStrokeLayerId ?? document.activeLayerId;
-    const layer = document.layers.find((item) => item.id === layerId);
+    const strokeIndex = Math.max(0, this.activeStrokeIndex);
     const pointerId = this.activePointerId;
     this.activeStroke = null;
-    this.activeStrokeLayerId = null;
     this.resetPointerState();
     if (pointerId !== null && this.canvas.hasPointerCapture(pointerId)) {
       this.canvas.releasePointerCapture(pointerId);
     }
     const endedAt = performance.now();
     this.lastStrokeEndedAt = endedAt;
-    if (layer) {
-      this.pushHistoryEntry({
-        kind: "stroke-add",
-        layerId,
-        stroke,
-        index: Math.max(0, layer.strokes.indexOf(stroke))
-      });
-    }
+    this.pushHistoryEntry({
+      kind: "stroke-add",
+      layerId,
+      stroke,
+      index: strokeIndex
+    });
+    this.clearActiveStrokeMetadata();
     this.recordInputDiagnostic({
       event: "stroke-finalized",
       time: endedAt,
@@ -1066,10 +1086,13 @@ export class InkCanvas {
   }
 
   private recordInputDiagnostic(entry: InkInputDiagnostic): void {
-    this.inputDiagnostics.push(entry);
-    if (this.inputDiagnostics.length > 240) {
-      this.inputDiagnostics.splice(0, this.inputDiagnostics.length - 240);
-    }
+    this.inputDiagnostics[this.inputDiagnosticCursor] = entry;
+    this.inputDiagnosticCursor =
+      (this.inputDiagnosticCursor + 1) % InkCanvas.MAX_INPUT_DIAGNOSTICS;
+    this.inputDiagnosticCount = Math.min(
+      InkCanvas.MAX_INPUT_DIAGNOSTICS,
+      this.inputDiagnosticCount + 1
+    );
   }
 
   private scheduleDocumentPublish(
@@ -1209,7 +1232,7 @@ export class InkCanvas {
       this.activeStroke,
       this.renderedPointCount,
       viewport,
-      getActiveLayer(this.options.getDocument()).opacity
+      this.activeStrokeLayerOpacity
     );
     this.renderedPointCount = this.activeStroke.points.length;
   }
@@ -1668,6 +1691,13 @@ export class InkCanvas {
     if (this.canvas.width !== width || this.canvas.height !== height) {
       this.render();
     }
+  }
+
+  private clearActiveStrokeMetadata(): void {
+    this.activeStrokeLayerId = null;
+    this.activeStrokeLayerOpacity = 1;
+    this.activeStrokeIndex = -1;
+    this.activeStrokeDocument = null;
   }
 
   private needsLayerOrderRefresh(document: AnnotationDocument): boolean {

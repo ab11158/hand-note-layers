@@ -28,6 +28,8 @@ Hand Note Layers 是一个 Obsidian 插件，用于在 Markdown 和 PDF 文件�
 
 - Pencil 同一帧的合并采样会批量绘制，避免逐采样点重复提交 Canvas。
 - Pencil 使用快速输入管线；即使上一笔的抬笔事件丢失，新落笔也会立即接管并完成上一笔，不阻塞连续书写。
+- Pencil 与手指平移共用稳定的指针捕获机制，同时保留新落笔接管保护，减少 iPad WebView 丢失笔画事件的概率。
+- 落笔使用滚动和尺寸更新时缓存的 Canvas 几何信息，不再为每一笔强制读取页面布局。
 - 笔画结束后的文档发布与自动保存延后执行，颜色、图层和保存逻辑不进入书写热路径。
 - 新笔画使用轻量撤销记录，笔画较多时不再为每次落笔复制完整图层笔画数组。
 - Markdown 的局部工作画布维持当前可视区域及边距，降低 iPad 上的大画布内存压力。
@@ -91,6 +93,6 @@ styles.css
 创建并推送 Git tag 后，GitHub Actions 会自动构建并发布 Release。
 
 ```bash
-git tag 0.5.3
-git push origin 0.5.3
+git tag 0.5.4
+git push origin 0.5.4
 ```
