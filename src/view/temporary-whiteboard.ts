@@ -60,6 +60,7 @@ export class TemporaryWhiteboard {
         startY: number;
         startBounds: WhiteboardBounds;
         handle: ResizeHandle | "move";
+        captureTarget: Element | null;
       }
     | null = null;
 
@@ -264,12 +265,20 @@ export class TemporaryWhiteboard {
     event.preventDefault();
     event.stopPropagation();
     this.options.onActivate();
+    const captureTarget =
+      event.currentTarget instanceof Element ? event.currentTarget : null;
+    try {
+      captureTarget?.setPointerCapture(event.pointerId);
+    } catch {
+      // Window listeners still complete the manipulation when capture is unavailable.
+    }
     this.manipulation = {
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
       startBounds: { ...this.bounds },
-      handle
+      handle,
+      captureTarget
     };
     window.addEventListener("pointermove", this.handleManipulationMove, {
       passive: false
@@ -284,6 +293,7 @@ export class TemporaryWhiteboard {
       return;
     }
     event.preventDefault();
+    event.stopPropagation();
     const dx = event.clientX - state.startX;
     const dy = event.clientY - state.startY;
     const next = { ...state.startBounds };
@@ -313,6 +323,16 @@ export class TemporaryWhiteboard {
   private handleManipulationEnd = (event: PointerEvent): void => {
     if (!this.manipulation || this.manipulation.pointerId !== event.pointerId) {
       return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const captureTarget = this.manipulation.captureTarget;
+    try {
+      if (captureTarget?.hasPointerCapture(event.pointerId)) {
+        captureTarget.releasePointerCapture(event.pointerId);
+      }
+    } catch {
+      // The pointer may already have been released by the platform.
     }
     this.manipulation = null;
     window.removeEventListener("pointermove", this.handleManipulationMove);

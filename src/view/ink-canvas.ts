@@ -2081,11 +2081,19 @@ export class InkCanvas {
     if (target === this.canvas || this.canvas.contains(target as Node | null)) {
       return true;
     }
-    if (
-      target instanceof Element &&
-      target.closest(".hand-note-canvas") !== null
-    ) {
-      return false;
+    if (target instanceof Element) {
+      if (
+        target.closest(
+          "button, input, select, textarea, a, [contenteditable='true'], " +
+            ".hand-note-whiteboard-controls, .hand-note-whiteboard-handle, " +
+            ".hand-note-selection-menu, .hand-note-layer-panel"
+        ) !== null
+      ) {
+        return false;
+      }
+      if (target.closest(".hand-note-canvas") !== null) {
+        return false;
+      }
     }
     const rect = this.canvas.getBoundingClientRect();
     return (
