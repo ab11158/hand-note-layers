@@ -193,9 +193,10 @@
 .hand-note-scroll {
   flex: 1 1 auto;
   min-height: 0;
+  overscroll-behavior: contain;
   overflow: auto;
   padding: 16px;
-  -webkit-overflow-scrolling: touch;
+  -webkit-overflow-scrolling: auto;
 }
 
 .hand-note-surface {
@@ -216,6 +217,7 @@
 
 .hand-note-canvas {
   cursor: crosshair;
+  touch-action: none;
 }
 
 .hand-note-selection-overlay {
