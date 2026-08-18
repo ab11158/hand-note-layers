@@ -124,6 +124,7 @@ export class TemporaryWhiteboard {
     });
     this.innerSurface.append(
       this.inkCanvas.canvas,
+      this.inkCanvas.liveCanvas,
       this.inkCanvas.selectionOutline,
       this.inkCanvas.selectionMenu
     );

@@ -10,6 +10,7 @@ import {
   getActiveLayer
 } from "../model/annotation";
 import { SelectionBounds, SelectionOverlay } from "./selection-overlay";
+import { drawFreehandStroke } from "./freehand-renderer";
 
 export interface InkCanvasViewport {
   documentWidth: number;
@@ -77,9 +78,11 @@ export class InkCanvas {
   private static readonly MAX_INPUT_DIAGNOSTICS = 600;
 
   readonly canvas: HTMLCanvasElement;
+  readonly liveCanvas: HTMLCanvasElement;
   readonly selectionOutline: SVGSVGElement;
   readonly selectionMenu: HTMLDivElement;
   private readonly context: CanvasRenderingContext2D;
+  private readonly liveContext: CanvasRenderingContext2D;
   private readonly options: InkCanvasOptions;
   private readonly selectionOverlay: SelectionOverlay;
   private activeStroke: AnnotationStroke | null = null;
@@ -93,8 +96,6 @@ export class InkCanvas {
   private interactionFrame: number | null = null;
   private resizeFrame: number | null = null;
   private readonly diagnosticFrames = new Set<number>();
-  private readonly windowRoutedPenDownEvents = new WeakSet<PointerEvent>();
-  private readonly windowRoutedPenMoveEvents = new WeakSet<PointerEvent>();
   private diagnosticObserver: PerformanceObserver | null = null;
   private activeRect: DOMRect | null = null;
   private cachedRect: DOMRect | null = null;
@@ -121,6 +122,8 @@ export class InkCanvas {
   private activeStrokeLayerOpacity = 1;
   private activeStrokeIndex = -1;
   private activeStrokeDocument: AnnotationDocument | null = null;
+  private activeStrokePathLength = 0;
+  private activeSmoothedPressure = 0.5;
   private lastStrokeEndedAt: number | null = null;
   private readonly inputDiagnostics = new Array<InkInputDiagnostic>(
     InkCanvas.MAX_INPUT_DIAGNOSTICS
@@ -154,6 +157,20 @@ export class InkCanvas {
     }
     this.context = context;
 
+    this.liveCanvas = document.createElement("canvas");
+    this.liveCanvas.className = "hand-note-canvas hand-note-live-canvas";
+    this.liveCanvas.style.position = "absolute";
+    this.liveCanvas.style.inset = "0";
+    this.liveCanvas.style.width = "100%";
+    this.liveCanvas.style.height = "100%";
+    this.liveCanvas.style.pointerEvents = "none";
+    this.liveCanvas.style.zIndex = "4";
+    const liveContext = this.liveCanvas.getContext("2d");
+    if (!liveContext) {
+      throw new Error("Unable to create live ink context");
+    }
+    this.liveContext = liveContext;
+
     this.selectionOverlay = new SelectionOverlay(
       () => this.deleteSelection(),
       () => this.cancelSelection()
@@ -170,10 +187,8 @@ export class InkCanvas {
     this.canvas.addEventListener("gotpointercapture", this.handlePointerCaptureChange);
     this.canvas.addEventListener("lostpointercapture", this.handlePointerCaptureChange);
     window.addEventListener("pointerdown", this.handleWindowPointerDownCapture, true);
-    window.addEventListener("pointermove", this.handleWindowPointerMoveCapture, true);
-    window.addEventListener("pointerrawupdate", this.handleWindowPointerMoveCapture, true);
-    window.addEventListener("pointerup", this.handlePointerUp, true);
-    window.addEventListener("pointercancel", this.handlePointerCancel, true);
+    window.addEventListener("pointerup", this.handlePointerUp);
+    window.addEventListener("pointercancel", this.handlePointerCancel);
     document.addEventListener("pointerdown", this.handleDocumentPointerDownCapture, true);
     this.updateInputMode();
     this.startPerformanceDiagnostics();
@@ -196,15 +211,14 @@ export class InkCanvas {
     this.canvas.removeEventListener("gotpointercapture", this.handlePointerCaptureChange);
     this.canvas.removeEventListener("lostpointercapture", this.handlePointerCaptureChange);
     window.removeEventListener("pointerdown", this.handleWindowPointerDownCapture, true);
-    window.removeEventListener("pointermove", this.handleWindowPointerMoveCapture, true);
-    window.removeEventListener("pointerrawupdate", this.handleWindowPointerMoveCapture, true);
-    window.removeEventListener("pointerup", this.handlePointerUp, true);
-    window.removeEventListener("pointercancel", this.handlePointerCancel, true);
+    window.removeEventListener("pointerup", this.handlePointerUp);
+    window.removeEventListener("pointercancel", this.handlePointerCancel);
     document.removeEventListener("pointerdown", this.handleDocumentPointerDownCapture, true);
     this.diagnosticObserver?.disconnect();
     this.observer?.disconnect();
     this.selectionOutline.remove();
     this.selectionMenu.remove();
+    this.liveCanvas.remove();
     if (this.interactionFrame !== null) {
       window.cancelAnimationFrame(this.interactionFrame);
     }
@@ -233,6 +247,7 @@ export class InkCanvas {
     this.renderedPointCount = 0;
     this.pendingEraserPoints = [];
     this.clearActiveStrokeMetadata();
+    this.clearLiveCanvas();
     this.cancelSelection();
     this.resetHistory();
     this.render();
@@ -251,18 +266,23 @@ export class InkCanvas {
 
   setViewport(viewport: InkCanvasViewport | null): void {
     this.viewport = viewport;
+    const canvases = [this.canvas, this.liveCanvas];
     if (viewport) {
-      this.canvas.style.inset = "auto";
-      this.canvas.style.left = `${viewport.offsetX}px`;
-      this.canvas.style.top = `${viewport.offsetY}px`;
-      this.canvas.style.width = `${viewport.width}px`;
-      this.canvas.style.height = `${viewport.height}px`;
+      for (const canvas of canvases) {
+        canvas.style.inset = "auto";
+        canvas.style.left = `${viewport.offsetX}px`;
+        canvas.style.top = `${viewport.offsetY}px`;
+        canvas.style.width = `${viewport.width}px`;
+        canvas.style.height = `${viewport.height}px`;
+      }
     } else {
-      this.canvas.style.inset = "0";
-      this.canvas.style.left = "";
-      this.canvas.style.top = "";
-      this.canvas.style.width = "100%";
-      this.canvas.style.height = "100%";
+      for (const canvas of canvases) {
+        canvas.style.inset = "0";
+        canvas.style.left = "";
+        canvas.style.top = "";
+        canvas.style.width = "100%";
+        canvas.style.height = "100%";
+      }
     }
     if (this.selectionBounds && this.lassoPoints.length > 2) {
       const dimensions =
@@ -479,9 +499,15 @@ export class InkCanvas {
       canvas.width = width;
       canvas.height = height;
     }
+    if (this.liveCanvas.width !== width || this.liveCanvas.height !== height) {
+      this.liveCanvas.width = width;
+      this.liveCanvas.height = height;
+    }
 
     this.context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
     this.context.clearRect(0, 0, rect.width, rect.height);
+    this.liveContext.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    this.liveContext.clearRect(0, 0, rect.width, rect.height);
     const viewport = this.currentViewport(rect);
 
     const document = this.options.getDocument();
@@ -512,6 +538,9 @@ export class InkCanvas {
         this.context.fillRect(left, top, width, height);
       }
       for (const stroke of layer.strokes) {
+        if (stroke === this.activeStroke && this.isFreehandStroke(stroke)) {
+          continue;
+        }
         if (this.options.pageIndex !== undefined && stroke.pageIndex !== this.options.pageIndex) {
           continue;
         }
@@ -524,7 +553,8 @@ export class InkCanvas {
     }
 
     this.context.globalAlpha = 1;
-    this.renderedPointCount = this.activeStroke?.points.length ?? 0;
+    this.renderedPointCount = 0;
+    this.drawLiveStroke();
   }
 
   private drawStroke(
@@ -547,6 +577,18 @@ export class InkCanvas {
 
     if (stroke.tool === "eraser") {
       context.strokeStyle = "rgba(0,0,0,0)";
+      context.restore();
+      return;
+    }
+
+    if (stroke.tool === "pen" || stroke.tool === "pencil") {
+      context.fillStyle = stroke.color;
+      drawFreehandStroke(
+        context,
+        stroke,
+        viewport,
+        this.options.getPressureEnabled()
+      );
       context.restore();
       return;
     }
@@ -618,9 +660,6 @@ export class InkCanvas {
   }
 
   private handlePointerDown = (event: PointerEvent): void => {
-    if (this.windowRoutedPenDownEvents.has(event)) {
-      return;
-    }
     const receivedAt = performance.now();
     this.recordInputDiagnostic({
       event: "pointerdown-received",
@@ -688,9 +727,7 @@ export class InkCanvas {
 
     this.deferPendingDocumentPublish();
     event.preventDefault();
-    if (event.pointerType !== "pen") {
-      this.canvas.setPointerCapture(event.pointerId);
-    }
+    this.canvas.setPointerCapture(event.pointerId);
     this.activePointerId = event.pointerId;
     this.activePointerKind = "draw";
     this.activeTool = tool;
@@ -710,6 +747,11 @@ export class InkCanvas {
       this.activeRect,
       this.activeViewport
     );
+    if (event.pointerType === "pen" && (tool === "pen" || tool === "pencil")) {
+      point.pressure = Math.max(0.12, Math.min(1, event.pressure));
+      this.activeStrokePathLength = 0;
+      this.activeSmoothedPressure = point.pressure;
+    }
     if (layer.whiteboard && !this.pointInBounds(point, layer.whiteboard.bounds)) {
       this.resetPointerState();
       if (this.canvas.hasPointerCapture(event.pointerId)) {
@@ -771,17 +813,11 @@ export class InkCanvas {
   };
 
   private handlePointerMove = (event: PointerEvent): void => {
-    if (this.windowRoutedPenMoveEvents.has(event)) {
-      return;
-    }
     if (event.pointerId !== this.activePointerId) {
       return;
     }
 
     event.preventDefault();
-    if (event.pointerType === "pen") {
-      event.stopPropagation();
-    }
     if (this.activePointerKind === "draw") {
       this.activeMoveCount += 1;
       if (this.activeFirstMoveAt === null) {
@@ -837,9 +873,6 @@ export class InkCanvas {
     }
 
     event.preventDefault();
-    if (event.pointerType === "pen") {
-      event.stopPropagation();
-    }
     this.recordInputDiagnostic({
       event: "pointerup-received",
       time: performance.now(),
@@ -899,9 +932,6 @@ export class InkCanvas {
     }
 
     event.preventDefault();
-    if (event.pointerType === "pen") {
-      event.stopPropagation();
-    }
     this.recordInputDiagnostic({
       event: "pointercancel-received",
       time: performance.now(),
@@ -968,6 +998,10 @@ export class InkCanvas {
     const pointerId = this.activePointerId;
     const firstMoveAt = this.activeFirstMoveAt;
     const moveCount = this.activeMoveCount;
+    if (this.isFreehandStroke(stroke) && this.activeViewport) {
+      this.drawStroke(stroke, this.activeViewport, this.activeStrokeLayerOpacity);
+      this.clearLiveCanvas();
+    }
     this.activeStroke = null;
     this.resetPointerState();
     if (pointerId !== null && this.canvas.hasPointerCapture(pointerId)) {
@@ -1214,31 +1248,6 @@ export class InkCanvas {
 
   private handleWindowPointerDownCapture = (event: PointerEvent): void => {
     this.recordPointerPhase("window-capture", event);
-    if (event.pointerType !== "pen" || event.target !== this.canvas) {
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    this.recordInputDiagnostic({
-      event: "pen-window-route-down",
-      time: performance.now(),
-      pointerId: event.pointerId,
-      pointerType: event.pointerType,
-      eventTimestamp: event.timeStamp,
-      arrivalLagMs: this.eventArrivalLag(event),
-      target: this.describeEventTarget(event.target),
-      detail: "no-pointer-capture"
-    });
-    this.handlePointerDown(event);
-    this.windowRoutedPenDownEvents.add(event);
-  };
-
-  private handleWindowPointerMoveCapture = (event: PointerEvent): void => {
-    if (event.pointerType !== "pen" || event.pointerId !== this.activePointerId) {
-      return;
-    }
-    this.handlePointerMove(event);
-    this.windowRoutedPenMoveEvents.add(event);
   };
 
   private handleDocumentPointerDownCapture = (event: PointerEvent): void => {
@@ -1508,7 +1517,17 @@ export class InkCanvas {
       return;
     }
 
-    if (!this.activeStroke || this.renderedPointCount >= this.activeStroke.points.length) {
+    if (!this.activeStroke) {
+      return;
+    }
+
+    if (this.isFreehandStroke(this.activeStroke)) {
+      this.drawLiveStroke();
+      this.renderedPointCount = this.activeStroke.points.length;
+      return;
+    }
+
+    if (this.renderedPointCount >= this.activeStroke.points.length) {
       return;
     }
 
@@ -1591,6 +1610,44 @@ export class InkCanvas {
     context.restore();
   }
 
+  private isFreehandStroke(stroke: AnnotationStroke): boolean {
+    return stroke.tool === "pen" || stroke.tool === "pencil";
+  }
+
+  private drawLiveStroke(): void {
+    const stroke = this.activeStroke;
+    if (!stroke || !this.isFreehandStroke(stroke)) {
+      this.clearLiveCanvas();
+      return;
+    }
+    const rect = this.activeRect ?? this.cachedRect ?? this.canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      return;
+    }
+    const ratio = this.canvasPixelRatio(rect.width, rect.height);
+    this.liveContext.setTransform(ratio, 0, 0, ratio, 0, 0);
+    this.liveContext.clearRect(0, 0, rect.width, rect.height);
+    this.liveContext.save();
+    this.liveContext.globalAlpha =
+      this.activeStrokeLayerOpacity *
+      (stroke.opacity ?? this.defaultOpacity(stroke.tool));
+    this.liveContext.fillStyle = stroke.color;
+    drawFreehandStroke(
+      this.liveContext,
+      stroke,
+      this.activeViewport ?? this.currentViewport(rect),
+      this.options.getPressureEnabled()
+    );
+    this.liveContext.restore();
+  }
+
+  private clearLiveCanvas(): void {
+    this.liveContext.save();
+    this.liveContext.setTransform(1, 0, 0, 1, 0, 0);
+    this.liveContext.clearRect(0, 0, this.liveCanvas.width, this.liveCanvas.height);
+    this.liveContext.restore();
+  }
+
   private collectStrokePoints(event: PointerEvent, forceLastPoint = false): void {
     if (!this.activeStroke || !this.activeRect || !this.activeViewport) {
       return;
@@ -1599,6 +1656,9 @@ export class InkCanvas {
     const samples = this.coalescedEvents(event);
     for (let index = 0; index < samples.length; index += 1) {
       const force = forceLastPoint && index === samples.length - 1;
+      if (!force && samples[index].pointerType === "pen" && samples[index].pressure <= 0.01) {
+        continue;
+      }
       const point = this.pointFromEvent(
         samples[index],
         this.activeRect,
@@ -1612,11 +1672,11 @@ export class InkCanvas {
         point.pressure =
           this.activeStroke.points[this.activeStroke.points.length - 1].pressure;
       }
-      this.appendStrokePoint(point, force);
+      this.appendStrokePoint(point, force, samples[index].pointerType === "pen");
     }
   }
 
-  private appendStrokePoint(point: StrokePoint, force: boolean): void {
+  private appendStrokePoint(point: StrokePoint, force: boolean, penInput: boolean): void {
     if (!this.activeStroke || !this.activeRect || !this.activeViewport) {
       return;
     }
@@ -1626,10 +1686,36 @@ export class InkCanvas {
     const dy = (point.y - last.y) * this.activeViewport.documentHeight;
     const distanceSquared = dx * dx + dy * dy;
     const pressureChanged = Math.abs(point.pressure - last.pressure) >= 0.025;
-    if (!force && distanceSquared < 0.25 && !pressureChanged) {
+    if (force && distanceSquared < 0.01 && !pressureChanged) {
       return;
     }
-    if (force && distanceSquared < 0.01 && !pressureChanged) {
+    if (penInput && this.isFreehandStroke(this.activeStroke)) {
+      const distance = Math.sqrt(distanceSquared);
+      const rawPressure = Math.max(0, Math.min(1, point.pressure));
+      const earlyPressure =
+        this.activeStrokePathLength < this.activeStroke.size
+          ? Math.max(0.12, rawPressure)
+          : rawPressure;
+      const eased =
+        this.activeSmoothedPressure +
+        (earlyPressure - this.activeSmoothedPressure) * 0.4;
+      const maxDelta = Math.max(
+        0.02,
+        0.3 * (distance / Math.max(1, this.activeStroke.size))
+      );
+      point.pressure = Math.max(
+        this.activeSmoothedPressure - maxDelta,
+        Math.min(this.activeSmoothedPressure + maxDelta, eased)
+      );
+      this.activeSmoothedPressure = point.pressure;
+      this.activeStrokePathLength += distance;
+      if (!force && distanceSquared < 1) {
+        last.x = point.x;
+        last.y = point.y;
+        last.pressure = Math.max(last.pressure, point.pressure);
+        return;
+      }
+    } else if (!force && distanceSquared < 0.25 && !pressureChanged) {
       return;
     }
     this.activeStroke.points.push(point);
@@ -1998,6 +2084,8 @@ export class InkCanvas {
     this.activeStrokeLayerOpacity = 1;
     this.activeStrokeIndex = -1;
     this.activeStrokeDocument = null;
+    this.activeStrokePathLength = 0;
+    this.activeSmoothedPressure = 0.5;
   }
 
   private needsLayerOrderRefresh(document: AnnotationDocument): boolean {

@@ -170,6 +170,7 @@ export class MarkdownAnnotationView extends ItemView {
     });
     this.surface.append(
       this.inkCanvas.canvas,
+      this.inkCanvas.liveCanvas,
       this.inkCanvas.selectionOutline,
       this.inkCanvas.selectionMenu
     );

@@ -26,6 +26,7 @@ Hand Note Layers 是一个 Obsidian 插件，用于在 Markdown 和 PDF 文件�
 
 ## 书写性能
 
+- `0.5.9` 使用独立实时笔迹 Canvas，并采用 MIT 许可的 `perfect-freehand` 生成压感轮廓；抬笔后才把当前笔合并到已完成笔迹层。
 - Pencil 同一帧的合并采样会批量绘制，避免逐采样点重复提交 Canvas。
 - Pencil 使用快速输入管线；即使上一笔的抬笔事件丢失，新落笔也会立即接管并完成上一笔，不阻塞连续书写。
 - Pencil 与手指平移共用稳定的指针捕获机制，同时保留新落笔接管保护，减少 iPad WebView 丢失笔画事件的概率。

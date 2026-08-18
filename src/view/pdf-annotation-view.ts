@@ -473,6 +473,7 @@ export class PdfAnnotationView extends ItemView {
     this.inkCanvases.set(pageIndex, inkCanvas);
     pageEl.append(
       inkCanvas.canvas,
+      inkCanvas.liveCanvas,
       inkCanvas.selectionOutline,
       inkCanvas.selectionMenu
     );
