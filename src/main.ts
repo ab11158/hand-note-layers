@@ -1,4 +1,4 @@
-import { Plugin, TFile } from "obsidian";
+import { Notice, Plugin, TFile } from "obsidian";
 import { deleteAnnotation } from "./storage/annotation-store";
 import {
   MARKDOWN_ANNOTATION_VIEW_TYPE,
@@ -75,6 +75,38 @@ export default class HandNoteLayersPlugin extends Plugin {
         }
         if (!checking) {
           view.togglePenAndEraser();
+        }
+        return true;
+      }
+    });
+
+    this.addCommand({
+      id: "copy-input-diagnostics",
+      name: "复制 Apple Pencil 输入诊断记录",
+      checkCallback: (checking) => {
+        const view = this.getActiveAnnotationView();
+        if (!view) {
+          return false;
+        }
+        if (!checking) {
+          const diagnostics = JSON.stringify(
+            {
+              capturedAt: new Date().toISOString(),
+              file: this.app.workspace.getActiveFile()?.path ?? null,
+              records: view.getInputDiagnostics()
+            },
+            null,
+            2
+          );
+          console.info("Hand Note Layers Apple Pencil diagnostics", diagnostics);
+          if (!navigator.clipboard) {
+            new Notice("诊断记录已输出到开发者控制台");
+            return;
+          }
+          void navigator.clipboard
+            .writeText(diagnostics)
+            .then(() => new Notice("Apple Pencil 诊断记录已复制"))
+            .catch(() => new Notice("诊断记录已输出到开发者控制台"));
         }
         return true;
       }

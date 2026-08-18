@@ -452,6 +452,9 @@ export class PdfAnnotationView extends ItemView {
       onDocumentChange: (next, renderCanvas) =>
         this.handleDocumentChange(next, renderCanvas, false),
       onActivate: () => {
+        if (this.activeInkTarget === "document") {
+          return;
+        }
         this.activeInkTarget = "document";
         this.whiteboard?.setEditing(false);
         this.annotationToolbar?.setWhiteboardActive(false);
@@ -459,11 +462,6 @@ export class PdfAnnotationView extends ItemView {
       onFingerPan: (deltaX, deltaY) => {
         this.scrollContainer.scrollLeft += deltaX;
         this.scrollContainer.scrollTop += deltaY;
-      },
-      onInteraction: (type) => {
-        if (type === "stroke-start") {
-          this.cancelScheduledSave();
-        }
       },
       onPencilShortcut: () => this.togglePenAndEraser(),
       pageIndex
@@ -775,6 +773,10 @@ export class PdfAnnotationView extends ItemView {
     );
   }
 
+  getInputDiagnostics(): unknown[] {
+    return this.currentInkCanvas()?.getInputDiagnostics() ?? [];
+  }
+
   private handleDocumentChange(
     document: AnnotationDocument,
     renderCanvases = true,
@@ -797,8 +799,12 @@ export class PdfAnnotationView extends ItemView {
     this.annotationToolbar?.setSaveStatus("saving");
     this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;
+      if (this.currentInkCanvas()?.isInteracting()) {
+        this.scheduleSave();
+        return;
+      }
       void this.flushSave();
-    }, 1000);
+    }, 2000);
   }
 
   private cancelScheduledSave(): void {

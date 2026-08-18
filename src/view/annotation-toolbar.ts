@@ -152,6 +152,7 @@ export class AnnotationToolbar {
       swatch.type = "button";
       swatch.className = "hand-note-color-swatch";
       swatch.style.setProperty("--hand-note-swatch", color);
+      swatch.style.backgroundColor = color;
       swatch.setAttribute("aria-label", `颜色位 ${index + 1}`);
       swatch.setAttribute("title", `颜色位 ${index + 1}`);
       swatch.addEventListener("click", () => {
@@ -378,6 +379,7 @@ export class AnnotationToolbar {
       button.type = "button";
       button.className = "hand-note-palette-swatch";
       button.style.setProperty("--hand-note-swatch", color);
+      button.style.backgroundColor = color;
       button.setAttribute("aria-label", `选择颜色 ${color}`);
       button.addEventListener("click", (event) => {
         event.stopPropagation();
@@ -397,6 +399,9 @@ export class AnnotationToolbar {
     this.colorSlots[this.activeColorSlot] = color;
     const button = this.colorButtons[this.activeColorSlot];
     button?.style.setProperty("--hand-note-swatch", color);
+    if (button) {
+      button.style.backgroundColor = color;
+    }
     try {
       window.localStorage.setItem(COLOR_STORAGE_KEY, JSON.stringify(this.colorSlots));
     } catch {
@@ -404,6 +409,7 @@ export class AnnotationToolbar {
     }
     this.options.onColorChange(color);
     this.setColor(color);
+    this.colorMenu.classList.remove("is-open");
   }
 
   private loadColorSlots(): string[] {

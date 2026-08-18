@@ -44,6 +44,16 @@ export interface InkCanvasHistoryState {
   redoStack: InkHistoryEntry[];
 }
 
+export interface InkInputDiagnostic {
+  event: string;
+  time: number;
+  pointerId?: number;
+  pointerType?: string;
+  firstInkMs?: number;
+  interStrokeMs?: number;
+  detail?: string;
+}
+
 type InkHistoryEntry =
   | { kind: "snapshot"; document: AnnotationDocument }
   | {
@@ -85,6 +95,16 @@ export class InkCanvas {
   private panVelocityX = 0;
   private panVelocityY = 0;
   private panInertiaFrame: number | null = null;
+  private publishTimer: number | null = null;
+  private pendingPublish: {
+    document: AnnotationDocument;
+    render: boolean;
+    checkLayerOrder: boolean;
+  } | null = null;
+  private strokeStartedAt = 0;
+  private activeStrokeLayerId: string | null = null;
+  private lastStrokeEndedAt: number | null = null;
+  private readonly inputDiagnostics: InkInputDiagnostic[] = [];
   private lassoPoints: StrokePoint[] = [];
   private selectedStrokeIds = new Set<string>();
   private selectedLayerId: string | null = null;
@@ -124,6 +144,8 @@ export class InkCanvas {
     this.canvas.addEventListener("pointerup", this.handlePointerUp);
     this.canvas.addEventListener("pointercancel", this.handlePointerUp);
     this.canvas.addEventListener("lostpointercapture", this.handleLostPointerCapture);
+    window.addEventListener("pointerup", this.handlePointerUp);
+    window.addEventListener("pointercancel", this.handlePointerUp);
     this.updateInputMode();
 
     if (typeof ResizeObserver !== "undefined") {
@@ -140,6 +162,8 @@ export class InkCanvas {
     this.canvas.removeEventListener("pointerup", this.handlePointerUp);
     this.canvas.removeEventListener("pointercancel", this.handlePointerUp);
     this.canvas.removeEventListener("lostpointercapture", this.handleLostPointerCapture);
+    window.removeEventListener("pointerup", this.handlePointerUp);
+    window.removeEventListener("pointercancel", this.handlePointerUp);
     this.observer?.disconnect();
     this.selectionOutline.remove();
     this.selectionMenu.remove();
@@ -149,6 +173,7 @@ export class InkCanvas {
     if (this.resizeFrame !== null) {
       window.cancelAnimationFrame(this.resizeFrame);
     }
+    this.flushDocumentPublish();
     this.stopPanInertia();
   }
 
@@ -214,6 +239,10 @@ export class InkCanvas {
 
   isInteracting(): boolean {
     return this.activePointerKind === "draw";
+  }
+
+  getInputDiagnostics(): InkInputDiagnostic[] {
+    return this.inputDiagnostics.slice();
   }
 
   hasSelection(): boolean {
@@ -533,8 +562,42 @@ export class InkCanvas {
   }
 
   private handlePointerDown = (event: PointerEvent): void => {
+    const receivedAt = performance.now();
+    this.recordInputDiagnostic({
+      event: "pointerdown-received",
+      time: receivedAt,
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      interStrokeMs:
+        this.lastStrokeEndedAt === null ? undefined : receivedAt - this.lastStrokeEndedAt
+    });
     if (this.activePointerId !== null) {
-      return;
+      if (event.pointerType !== "pen") {
+        this.recordInputDiagnostic({
+          event: "pointerdown-rejected",
+          time: receivedAt,
+          pointerId: event.pointerId,
+          pointerType: event.pointerType,
+          detail: `active-pointer:${this.activePointerId}`
+        });
+        return;
+      }
+      this.recordInputDiagnostic({
+        event: "stale-pointer-takeover",
+        time: receivedAt,
+        pointerId: event.pointerId,
+        pointerType: event.pointerType,
+        detail: `replaced-pointer:${this.activePointerId}`
+      });
+      if (this.activePointerKind === "draw" && this.activeStroke) {
+        this.finalizeActiveStroke("superseded");
+      } else {
+        const stalePointerId = this.activePointerId;
+        this.resetPointerState();
+        if (stalePointerId !== null && this.canvas.hasPointerCapture(stalePointerId)) {
+          this.canvas.releasePointerCapture(stalePointerId);
+        }
+      }
     }
 
     this.stopPanInertia();
@@ -568,13 +631,16 @@ export class InkCanvas {
     }
 
     event.preventDefault();
-    this.canvas.setPointerCapture(event.pointerId);
+    if (event.pointerType !== "pen") {
+      this.canvas.setPointerCapture(event.pointerId);
+    }
     this.activePointerId = event.pointerId;
     this.activePointerKind = "draw";
     this.activeTool = tool;
     this.options.onActivate?.();
     this.activeRect = this.canvas.getBoundingClientRect();
     this.activeViewport = this.currentViewport(this.activeRect);
+    this.strokeStartedAt = receivedAt;
     this.ensureCanvasReady(this.activeRect);
     this.renderedPointCount = 0;
     this.pendingEraserPoints = [];
@@ -623,9 +689,18 @@ export class InkCanvas {
       points: [point],
       pageIndex: this.options.pageIndex
     };
+    this.activeStrokeLayerId = layer.id;
     layer.strokes.push(this.activeStroke);
     this.options.onInteraction?.("stroke-start");
     this.flushInteractionFrame();
+    const firstInkAt = performance.now();
+    this.recordInputDiagnostic({
+      event: "first-ink",
+      time: firstInkAt,
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      firstInkMs: firstInkAt - receivedAt
+    });
   };
 
   private handlePointerMove = (event: PointerEvent): void => {
@@ -673,6 +748,12 @@ export class InkCanvas {
     }
 
     event.preventDefault();
+    this.recordInputDiagnostic({
+      event: "pointerup-received",
+      time: performance.now(),
+      pointerId: event.pointerId,
+      pointerType: event.pointerType
+    });
 
     if (this.activePointerKind === "pan") {
       const pointerId = event.pointerId;
@@ -694,6 +775,9 @@ export class InkCanvas {
       this.collectEraserPoints(event);
     } else if (this.activeStroke) {
       this.collectStrokePoints(event, true);
+      this.flushPendingInteraction();
+      this.finalizeActiveStroke("pointerup", event.pointerType);
+      return;
     }
     this.flushPendingInteraction();
 
@@ -707,18 +791,6 @@ export class InkCanvas {
         this.undoStack.pop();
       }
       this.eraserChanged = false;
-    } else if (this.activeStroke) {
-      const layer = getActiveLayer(this.options.getDocument());
-      this.pushHistoryEntry({
-        kind: "stroke-add",
-        layerId: layer.id,
-        stroke: this.activeStroke,
-        index: Math.max(0, layer.strokes.length - 1)
-      });
-      this.activeStroke = null;
-      this.options.onInteraction?.("stroke-end");
-      const document = this.options.getDocument();
-      this.options.onDocumentChange(document, this.needsLayerOrderRefresh(document));
     }
 
     const pointerId = event.pointerId;
@@ -743,6 +815,43 @@ export class InkCanvas {
     this.activeViewport = null;
     this.renderedPointCount = 0;
     this.pendingEraserPoints = [];
+  }
+
+  private finalizeActiveStroke(reason: string, pointerType = "pen"): void {
+    const stroke = this.activeStroke;
+    if (!stroke) {
+      return;
+    }
+    this.flushPendingInteraction();
+    const document = this.options.getDocument();
+    const layerId = this.activeStrokeLayerId ?? document.activeLayerId;
+    const layer = document.layers.find((item) => item.id === layerId);
+    const pointerId = this.activePointerId;
+    this.activeStroke = null;
+    this.activeStrokeLayerId = null;
+    this.resetPointerState();
+    if (pointerId !== null && this.canvas.hasPointerCapture(pointerId)) {
+      this.canvas.releasePointerCapture(pointerId);
+    }
+    const endedAt = performance.now();
+    this.lastStrokeEndedAt = endedAt;
+    if (layer) {
+      this.pushHistoryEntry({
+        kind: "stroke-add",
+        layerId,
+        stroke,
+        index: Math.max(0, layer.strokes.indexOf(stroke))
+      });
+    }
+    this.recordInputDiagnostic({
+      event: "stroke-finalized",
+      time: endedAt,
+      pointerId: pointerId ?? undefined,
+      pointerType,
+      detail: `${reason};duration:${Math.max(0, endedAt - this.strokeStartedAt).toFixed(2)}ms`
+    });
+    this.options.onInteraction?.("stroke-end");
+    this.scheduleDocumentPublish(document, false, true);
   }
 
   private startPanInertia(velocityX: number, velocityY: number): void {
@@ -954,6 +1063,61 @@ export class InkCanvas {
       y: Math.max(0, Math.min(1, y)),
       pressure: event.pressure || (event.pointerType === "pen" ? 0.5 : 0.5)
     };
+  }
+
+  private recordInputDiagnostic(entry: InkInputDiagnostic): void {
+    this.inputDiagnostics.push(entry);
+    if (this.inputDiagnostics.length > 240) {
+      this.inputDiagnostics.splice(0, this.inputDiagnostics.length - 240);
+    }
+  }
+
+  private scheduleDocumentPublish(
+    document: AnnotationDocument,
+    render: boolean,
+    checkLayerOrder = false
+  ): void {
+    this.pendingPublish = {
+      document,
+      render: (this.pendingPublish?.render ?? false) || render,
+      checkLayerOrder: (this.pendingPublish?.checkLayerOrder ?? false) || checkLayerOrder
+    };
+    if (this.publishTimer !== null) {
+      return;
+    }
+    this.publishTimer = window.setTimeout(() => {
+      this.publishTimer = null;
+      if (this.activePointerKind === "draw") {
+        this.scheduleDocumentPublish(
+          this.pendingPublish?.document ?? document,
+          this.pendingPublish?.render ?? render,
+          this.pendingPublish?.checkLayerOrder ?? checkLayerOrder
+        );
+        return;
+      }
+      this.flushDocumentPublish();
+    }, 64);
+  }
+
+  private flushDocumentPublish(): void {
+    if (this.publishTimer !== null) {
+      window.clearTimeout(this.publishTimer);
+      this.publishTimer = null;
+    }
+    const pending = this.pendingPublish;
+    this.pendingPublish = null;
+    if (!pending) {
+      return;
+    }
+    const render =
+      pending.render ||
+      (pending.checkLayerOrder && this.needsLayerOrderRefresh(pending.document));
+    this.options.onDocumentChange(pending.document, render);
+    this.recordInputDiagnostic({
+      event: "document-published",
+      time: performance.now(),
+      detail: render ? "render" : "incremental"
+    });
   }
 
   private pushHistory(document: AnnotationDocument): void {
