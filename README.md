@@ -30,6 +30,7 @@ Hand Note Layers 是一个 Obsidian 插件，用于在 Markdown 和 PDF 文件�
 - `0.6.0` 是 Apple Pencil 手势仲裁测试版：书写 Canvas 使用 `touch-action: none`，关闭注释滚动容器的 iOS 原生惯性滚动，手指仍使用插件内部平移；笔刷、图层、颜色和保存路径保持不变。
 - `0.6.1` 使用8槽位 Pencil 输入池：抬笔只封存原始笔画并立即释放活动状态，连续书写停顿150 ms后再批量生成最终轮廓、记录历史并发布文档；槽位占满时动态扩容，不拒绝第9笔。静止点笔保持单点坐标，避免后台平滑造成点位抖动。
 - `0.6.2` 强制按槽位1到8循环预备，并记录每笔的启动来源。正常笔标记为 `real-pointerdown`；如果真实Down缺失但出现带压力或接触按钮的Pencil move，则由当前预备槽位以 `orphan-pointermove` 救援启动。另行记录stylus Touch旁路信号，用于区分Down丢失、Pointer通道丢失和整段DOM数据缺失。
+- `0.6.3` 增加抬笔后350毫秒输入探针，同时监测 Pointer、pointerrawupdate、Stylus Touch 和兼容 Mouse 信号。该版本只扩展诊断，不改变书写、图层和保存热路径，用于确认漏笔数据是否曾到达 Obsidian WebView。
 - Pencil 同一帧的合并采样会批量绘制，避免逐采样点重复提交 Canvas。
 - Pencil 使用快速输入管线；即使上一笔的抬笔事件丢失，新落笔也会立即接管并完成上一笔，不阻塞连续书写。
 - Pencil 与手指平移共用稳定的指针捕获机制，同时保留新落笔接管保护，减少 iPad WebView 丢失笔画事件的概率。
