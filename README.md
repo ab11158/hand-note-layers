@@ -33,6 +33,7 @@ Hand Note Layers 是一个 Obsidian 插件，用于在 Markdown 和 PDF 文件�
 - `0.6.3` 增加抬笔后350毫秒输入探针，同时监测 Pointer、pointerrawupdate、Stylus Touch 和兼容 Mouse 信号。该版本只扩展诊断，不改变书写、图层和保存热路径，用于确认漏笔数据是否曾到达 Obsidian WebView。
 - `0.6.4` 将现有透明Canvas改为Pencil专属输入终端：Pencil在窗口捕获阶段直接进入书写管线，不再使用Pointer Capture；Stylus Touch在Pointer缺失时接管完整笔画，并拦截书写区域内由短笔产生的兼容点击。手指继续只负责页面平移。
 - `0.6.5` 修复临时白板整体移动和缩放锚点被Pencil书写层抢占的问题。白板控制按钮会独立捕获拖动指针，移动期间保持外框与内部画布稳定，手指和Pencil均可操作控制柄。
+- `0.6.6` 将Pencil的坐标救援严格限制在当前Hand Note Layers视图内，避免后台注释Canvas误拦截Obsidian设置页、第三方插件列表及其他工作区界面的点击。
 - Pencil 同一帧的合并采样会批量绘制，避免逐采样点重复提交 Canvas。
 - Pencil 使用快速输入管线；即使上一笔的抬笔事件丢失，新落笔也会立即接管并完成上一笔，不阻塞连续书写。
 - Pencil 与手指平移共用稳定的指针捕获机制，同时保留新落笔接管保护，减少 iPad WebView 丢失笔画事件的概率。

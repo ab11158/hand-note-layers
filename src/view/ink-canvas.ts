@@ -2094,6 +2094,13 @@ export class InkCanvas {
       if (target.closest(".hand-note-canvas") !== null) {
         return false;
       }
+      const ownerView = this.canvas.closest(".hand-note-view");
+      const targetView = target.closest(".hand-note-view");
+      if (!ownerView || targetView !== ownerView) {
+        return false;
+      }
+    } else {
+      return false;
     }
     const rect = this.canvas.getBoundingClientRect();
     return (
