@@ -24,6 +24,7 @@ export interface AnnotationToolbarOptions {
   onRedo: () => void;
   onClear: () => void;
   onSave: () => void;
+  onExport?: () => void;
   onLayers: () => void;
   navigationControls?: HTMLElement[];
 }
@@ -199,7 +200,13 @@ export class AnnotationToolbar {
     this.saveStatus.className = "hand-note-save-status";
     const layerButton = createIconButton("layers", "笔记图层");
     layerButton.addEventListener("click", options.onLayers);
-    documentGroup.append(this.saveButton, this.saveStatus, layerButton);
+    documentGroup.append(this.saveButton, this.saveStatus);
+    if (options.onExport) {
+      const exportButton = createIconButton("download", "导出带批注 PDF");
+      exportButton.addEventListener("click", options.onExport);
+      documentGroup.append(exportButton);
+    }
+    documentGroup.append(layerButton);
 
     this.element.append(
       toolGroup,

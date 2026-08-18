@@ -1,5 +1,6 @@
 import {
   ItemView,
+  Notice,
   TFile,
   ViewStateResult,
   WorkspaceLeaf
@@ -11,10 +12,12 @@ import {
   AnnotationTool,
   EraserMode,
   SelectionMode,
+  cloneDocument,
   createLayer,
   getActiveLayer,
   nextLayerName
 } from "../model/annotation";
+import { exportAnnotatedPdf } from "../export/annotation-export";
 import {
   loadAnnotation,
   saveAnnotation
@@ -23,7 +26,10 @@ import { AnnotationToolbar } from "./annotation-toolbar";
 import { InkCanvas, InkCanvasHistoryState } from "./ink-canvas";
 import { LayerPanel } from "./layer-panel";
 import { createIconButton } from "./ui";
-import { TemporaryWhiteboard } from "./temporary-whiteboard";
+import {
+  TemporaryWhiteboard,
+  draftFromWhiteboardLayer
+} from "./temporary-whiteboard";
 
 export const PDF_ANNOTATION_VIEW_TYPE = "hand-note-pdf-annotation";
 
@@ -55,6 +61,7 @@ export class PdfAnnotationView extends ItemView {
   private toolbar: HTMLDivElement;
   private annotationToolbar: AnnotationToolbar | null = null;
   private whiteboard: TemporaryWhiteboard | null = null;
+  private editingWhiteboardLayerId: string | null = null;
   private whiteboardPageIndex: number | null = null;
   private activeInkTarget: "document" | "whiteboard" = "document";
   private pageContainer: HTMLDivElement;
@@ -158,6 +165,7 @@ export class PdfAnnotationView extends ItemView {
       onAddLayer: () => this.addLayer(),
       onDeleteLayer: (layerId) => this.deleteLayer(layerId),
       onSelectLayer: (layerId) => this.selectLayer(layerId),
+      onEditWhiteboard: (layerId) => void this.editWhiteboardLayer(layerId),
       onRenameLayer: (layerId, name) => this.renameLayer(layerId, name),
       onToggleVisibility: (layerId) => this.toggleVisibility(layerId),
       onOpacityChange: (layerId, opacity) => this.setLayerOpacity(layerId, opacity),
@@ -177,6 +185,7 @@ export class PdfAnnotationView extends ItemView {
     await this.flushSave();
     this.whiteboard?.destroy();
     this.whiteboard = null;
+    this.editingWhiteboardLayerId = null;
     this.whiteboardPageIndex = null;
     this.pageRenderGeneration += 1;
     this.pageObserver?.disconnect();
@@ -267,6 +276,7 @@ export class PdfAnnotationView extends ItemView {
       onRedo: () => this.currentInkCanvas()?.redo(),
       onClear: () => this.currentInkCanvas()?.clearActiveLayer(),
       onSave: () => void this.flushSave(),
+      onExport: () => void this.exportPdf(),
       onLayers: () => {
         this.toggleLayerPanel(!this.layerPanel?.element.classList.contains("is-open"));
       },
@@ -475,6 +485,7 @@ export class PdfAnnotationView extends ItemView {
       inkCanvas.canvas,
       inkCanvas.liveCanvas,
       inkCanvas.selectionOutline,
+      inkCanvas.selectionTransform,
       inkCanvas.selectionMenu
     );
     inkCanvas.render();
@@ -711,16 +722,122 @@ export class PdfAnnotationView extends ItemView {
     this.annotationToolbar?.setWhiteboardActive(true);
   }
 
+  private async editWhiteboardLayer(layerId: string): Promise<void> {
+    if (!this.document) {
+      return;
+    }
+    if (this.editingWhiteboardLayerId === layerId && this.whiteboard) {
+      this.whiteboard.setEditing(true);
+      this.activeInkTarget = "whiteboard";
+      this.annotationToolbar?.setWhiteboardActive(true);
+      return;
+    }
+    if (this.whiteboard) {
+      if (this.editingWhiteboardLayerId) {
+        this.commitEditedWhiteboard(true);
+      } else {
+        this.updateWhiteboardDraft(this.whiteboard.getDraft());
+        this.whiteboard.destroy();
+        this.whiteboard = null;
+        this.whiteboardPageIndex = null;
+      }
+    }
+    const layer = this.document.layers.find((item) => item.id === layerId);
+    if (!layer?.whiteboard) {
+      return;
+    }
+    const pageIndex = layer.whiteboard.bounds.pageIndex ?? this.currentPage;
+    await this.renderPage(pageIndex);
+    const pageEl = this.pageElements.get(pageIndex);
+    if (!pageEl) {
+      return;
+    }
+    const draft = draftFromWhiteboardLayer(layer, pageEl, pageIndex);
+    if (!draft) {
+      return;
+    }
+    this.updateCurrentPage(pageIndex);
+    pageEl.scrollIntoView({ block: "center" });
+    this.editingWhiteboardLayerId = layer.id;
+    layer.visible = false;
+    this.handleDocumentChange(this.document, true, false);
+    this.whiteboardPageIndex = pageIndex;
+    this.whiteboard = new TemporaryWhiteboard({
+      host: pageEl,
+      initialDraft: draft,
+      pageIndex,
+      initialBounds: draft.bounds,
+      getTool: () => this.currentTool,
+      getColor: () => this.currentColor,
+      getSize: () => this.toolSizes[this.currentTool],
+      getEraserSize: () => this.toolSizes.eraser,
+      getEraserMode: () => this.eraserMode,
+      getPressureEnabled: () => this.pressureEnabled,
+      onActivate: () => {
+        this.activeInkTarget = "whiteboard";
+      },
+      onChange: (nextDraft) => this.updateWhiteboardDraft(nextDraft),
+      onSave: (nextLayer, nextDraft) =>
+        this.saveWhiteboardLayer(nextLayer, nextDraft.id),
+      onDelete: () => this.deleteWhiteboard(),
+      onPencilShortcut: () => this.togglePenAndEraser()
+    });
+    this.activeInkTarget = "whiteboard";
+    this.annotationToolbar?.setWhiteboardActive(true);
+  }
+
+  private commitEditedWhiteboard(hide: boolean): void {
+    const layerId = this.editingWhiteboardLayerId;
+    const whiteboard = this.whiteboard;
+    if (!layerId || !whiteboard || !this.document) {
+      return;
+    }
+    const index = this.document.layers.findIndex((layer) => layer.id === layerId);
+    if (index < 0) {
+      return;
+    }
+    const previous = this.document.layers[index];
+    const draft = whiteboard.getDraft();
+    const replacement = whiteboard.createLayer(
+      previous.name,
+      previous.whiteboard?.bounds.pageIndex
+    );
+    replacement.id = previous.id;
+    replacement.name = previous.name;
+    replacement.opacity = previous.opacity;
+    replacement.visible = !hide;
+    this.document.layers[index] = replacement;
+    this.document.draftWhiteboards = (this.document.draftWhiteboards ?? []).filter(
+      (item) => item.id !== draft.id
+    );
+    whiteboard.destroy();
+    this.whiteboard = null;
+    this.whiteboardPageIndex = null;
+    this.editingWhiteboardLayerId = null;
+    this.activeInkTarget = "document";
+    this.annotationToolbar?.setWhiteboardActive(false);
+    this.handleDocumentChange(this.document);
+  }
+
   private deleteWhiteboard(): void {
     const draftId = this.whiteboard?.getDraft().id;
+    const editingLayerId = this.editingWhiteboardLayerId;
     this.whiteboard?.destroy();
     this.whiteboard = null;
     this.whiteboardPageIndex = null;
+    this.editingWhiteboardLayerId = null;
     if (draftId && this.document) {
       this.document.draftWhiteboards = (this.document.draftWhiteboards ?? []).filter(
         (draft) => draft.id !== draftId
       );
       this.handleDocumentChange(this.document, false);
+    }
+    if (editingLayerId && this.document) {
+      this.document.layers = this.document.layers.filter(
+        (layer) => layer.id !== editingLayerId
+      );
+      getActiveLayer(this.document);
+      this.handleDocumentChange(this.document);
     }
     this.activeInkTarget = "document";
     this.annotationToolbar?.setWhiteboardActive(false);
@@ -749,10 +866,23 @@ export class PdfAnnotationView extends ItemView {
       return;
     }
     this.currentDocumentInkCanvas()?.recordHistory();
-    const number =
-      this.document.layers.filter((item) => /^白板\d+$/.test(item.name)).length + 1;
-    layer.name = `白板${number}`;
-    this.document.layers.push(layer);
+    const editingLayerId = this.editingWhiteboardLayerId;
+    const existingIndex = editingLayerId
+      ? this.document.layers.findIndex((item) => item.id === editingLayerId)
+      : -1;
+    if (existingIndex >= 0) {
+      const existing = this.document.layers[existingIndex];
+      layer.id = existing.id;
+      layer.name = existing.name;
+      layer.opacity = existing.opacity;
+      layer.visible = true;
+      this.document.layers[existingIndex] = layer;
+    } else {
+      const number =
+        this.document.layers.filter((item) => /^白板\d+$/.test(item.name)).length + 1;
+      layer.name = `白板${number}`;
+      this.document.layers.push(layer);
+    }
     getActiveLayer(this.document);
     this.document.draftWhiteboards = (this.document.draftWhiteboards ?? []).filter(
       (draft) => draft.id !== draftId
@@ -760,6 +890,7 @@ export class PdfAnnotationView extends ItemView {
     this.whiteboard?.destroy();
     this.whiteboard = null;
     this.whiteboardPageIndex = null;
+    this.editingWhiteboardLayerId = null;
     this.activeInkTarget = "document";
     this.annotationToolbar?.setWhiteboardActive(false);
     this.handleDocumentChange(this.document);
@@ -777,6 +908,36 @@ export class PdfAnnotationView extends ItemView {
   async prepareExport(): Promise<TFile | null> {
     await this.flushSave();
     return this.sourceFile;
+  }
+
+  private async exportPdf(): Promise<void> {
+    if (!this.sourceFile || !this.document) {
+      return;
+    }
+    try {
+      await this.flushSave();
+      const exportedDocument = cloneDocument(this.document);
+      if (this.editingWhiteboardLayerId) {
+        const savedWhiteboard = exportedDocument.layers.find(
+          (layer) => layer.id === this.editingWhiteboardLayerId
+        );
+        if (savedWhiteboard) {
+          savedWhiteboard.visible = true;
+        }
+      }
+      const result = await exportAnnotatedPdf(
+        this.app,
+        this.sourceFile,
+        exportedDocument
+      );
+      const drafts = result.excludedDraftWhiteboards
+        ? `，已排除 ${result.excludedDraftWhiteboards} 个未保存白板`
+        : "";
+      new Notice(`PDF 已导出到 ${result.path}${drafts}`, 8000);
+    } catch (error) {
+      console.error("Hand Note Layers: failed to export annotated PDF", error);
+      new Notice("带批注 PDF 导出失败，请查看开发者控制台");
+    }
   }
 
   private handleDocumentChange(
@@ -864,6 +1025,7 @@ export class PdfAnnotationView extends ItemView {
     if (!this.document) {
       return;
     }
+    this.commitEditedWhiteboard(true);
     const layer = this.document.layers.find((item) => item.id === layerId);
     if (!layer || layer.whiteboard) {
       return;
@@ -886,6 +1048,10 @@ export class PdfAnnotationView extends ItemView {
   private toggleVisibility(layerId: string): void {
     const layer = this.document?.layers.find((item) => item.id === layerId);
     if (!layer) {
+      return;
+    }
+    if (layer.id === this.editingWhiteboardLayerId) {
+      this.commitEditedWhiteboard(true);
       return;
     }
     if (layer.id === this.document?.activeLayerId) {

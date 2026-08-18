@@ -35,6 +35,44 @@ export interface TemporaryWhiteboardOptions {
   onPencilShortcut?: () => void;
 }
 
+export function draftFromWhiteboardLayer(
+  layer: AnnotationLayer,
+  host: HTMLElement,
+  pageIndex?: number
+): WhiteboardDraft | null {
+  if (!layer.whiteboard) {
+    return null;
+  }
+  const hostWidth = Math.max(1, host.clientWidth);
+  const hostHeight = Math.max(1, host.scrollHeight);
+  const bounds = layer.whiteboard.bounds;
+  const left = bounds.minX * hostWidth;
+  const top = bounds.minY * hostHeight;
+  const width = Math.max(1, (bounds.maxX - bounds.minX) * hostWidth);
+  const height = Math.max(1, (bounds.maxY - bounds.minY) * hostHeight);
+  return {
+    id: generateId(),
+    name: layer.name,
+    bounds: { left, top, width, height },
+    hostWidth,
+    hostHeight,
+    virtualWidth: width,
+    virtualHeight: height,
+    panX: 0,
+    panY: 0,
+    pageIndex: pageIndex ?? bounds.pageIndex,
+    strokes: layer.strokes.map((stroke) => ({
+      ...stroke,
+      points: stroke.points.map((point) => ({
+        ...point,
+        x: (point.x * hostWidth - left) / width,
+        y: (point.y * hostHeight - top) / height
+      }))
+    })),
+    updatedAt: Date.now()
+  };
+}
+
 type ResizeHandle = "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | "nw";
 
 export class TemporaryWhiteboard {
@@ -127,6 +165,7 @@ export class TemporaryWhiteboard {
       this.inkCanvas.canvas,
       this.inkCanvas.liveCanvas,
       this.inkCanvas.selectionOutline,
+      this.inkCanvas.selectionTransform,
       this.inkCanvas.selectionMenu
     );
     this.applyBounds();

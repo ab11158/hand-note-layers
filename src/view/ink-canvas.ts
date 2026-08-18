@@ -64,6 +64,7 @@ export class InkCanvas {
   readonly liveCanvas: HTMLCanvasElement;
   readonly selectionOutline: SVGSVGElement;
   readonly selectionMenu: HTMLDivElement;
+  readonly selectionTransform: HTMLDivElement;
   private readonly context: CanvasRenderingContext2D;
   private readonly liveContext: CanvasRenderingContext2D;
   private readonly options: InkCanvasOptions;
@@ -108,6 +109,15 @@ export class InkCanvas {
   private selectedStrokeIds = new Set<string>();
   private selectedLayerId: string | null = null;
   private selectionBounds: SelectionBounds | null = null;
+  private selectionTransformState: {
+    pointerId: number;
+    handle: string;
+    startX: number;
+    startY: number;
+    bounds: SelectionBounds;
+    points: Map<string, StrokePoint[]>;
+    changed: boolean;
+  } | null = null;
   private readonly strokeBounds = new WeakMap<AnnotationStroke, {
     minX: number;
     minY: number;
@@ -147,10 +157,13 @@ export class InkCanvas {
 
     this.selectionOverlay = new SelectionOverlay(
       () => this.deleteSelection(),
-      () => this.cancelSelection()
+      () => this.cancelSelection(),
+      () => this.duplicateSelection(),
+      (event, handle) => this.beginSelectionTransform(event, handle)
     );
     this.selectionOutline = this.selectionOverlay.outline;
     this.selectionMenu = this.selectionOverlay.menu;
+    this.selectionTransform = this.selectionOverlay.transformBox;
 
     this.canvas.addEventListener("pointerdown", this.handlePointerDown);
     this.canvas.addEventListener("pointermove", this.handlePointerMove);
@@ -222,6 +235,7 @@ export class InkCanvas {
     this.observer?.disconnect();
     this.selectionOutline.remove();
     this.selectionMenu.remove();
+    this.selectionTransform.remove();
     this.liveCanvas.remove();
     if (this.interactionFrame !== null) {
       window.cancelAnimationFrame(this.interactionFrame);
@@ -232,6 +246,7 @@ export class InkCanvas {
     this.finalizeActiveStroke();
     this.flushDocumentPublish();
     this.stopPanInertia();
+    this.endSelectionTransform();
   }
 
   setDocument(_document: AnnotationDocument): void {
@@ -316,6 +331,7 @@ export class InkCanvas {
   }
 
   cancelSelection(): void {
+    this.endSelectionTransform();
     this.lassoPoints = [];
     this.selectedStrokeIds.clear();
     this.selectedLayerId = null;
@@ -340,6 +356,212 @@ export class InkCanvas {
     this.cancelSelection();
     this.options.onInteraction?.("selection-delete");
     this.options.onDocumentChange(document);
+  }
+
+  duplicateSelection(): void {
+    if (this.selectedStrokeIds.size === 0) {
+      return;
+    }
+    const document = this.options.getDocument();
+    const layer = document.layers.find((item) => item.id === this.selectedLayerId);
+    if (!layer) {
+      return;
+    }
+    this.pushHistory(document);
+    const viewport = this.currentViewport(this.canvas.getBoundingClientRect());
+    const offsetX = 12 / Math.max(1, viewport.documentWidth);
+    const offsetY = 12 / Math.max(1, viewport.documentHeight);
+    const duplicates = layer.strokes
+      .filter((stroke) => this.selectedStrokeIds.has(stroke.id))
+      .map((stroke) => ({
+        ...stroke,
+        id: generateId(),
+        points: stroke.points.map((point) => ({
+          ...point,
+          x: Math.max(0, Math.min(1, point.x + offsetX)),
+          y: Math.max(0, Math.min(1, point.y + offsetY))
+        }))
+      }));
+    layer.strokes.push(...duplicates);
+    this.selectedStrokeIds = new Set(duplicates.map((stroke) => stroke.id));
+    this.refreshSelectionBounds();
+    this.options.onDocumentChange(document);
+  }
+
+  private beginSelectionTransform(event: PointerEvent, handle: string): void {
+    if (
+      event.pointerType === "pen" ||
+      !this.selectionBounds ||
+      !this.selectedLayerId ||
+      this.selectedStrokeIds.size === 0
+    ) {
+      return;
+    }
+    const layer = this.options
+      .getDocument()
+      .layers.find((item) => item.id === this.selectedLayerId);
+    if (!layer) {
+      return;
+    }
+    const points = new Map<string, StrokePoint[]>();
+    for (const stroke of layer.strokes) {
+      if (this.selectedStrokeIds.has(stroke.id)) {
+        points.set(stroke.id, stroke.points.map((point) => ({ ...point })));
+      }
+    }
+    this.selectionTransformState = {
+      pointerId: event.pointerId,
+      handle,
+      startX: event.clientX,
+      startY: event.clientY,
+      bounds: { ...this.selectionBounds },
+      points,
+      changed: false
+    };
+    window.addEventListener("pointermove", this.handleSelectionTransformMove, {
+      passive: false
+    });
+    window.addEventListener("pointerup", this.handleSelectionTransformEnd);
+    window.addEventListener("pointercancel", this.handleSelectionTransformEnd);
+  }
+
+  private handleSelectionTransformMove = (event: PointerEvent): void => {
+    const state = this.selectionTransformState;
+    if (!state || event.pointerId !== state.pointerId) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const viewport = this.currentViewport(this.canvas.getBoundingClientRect());
+    const dx = (event.clientX - state.startX) / Math.max(1, viewport.documentWidth);
+    const dy = (event.clientY - state.startY) / Math.max(1, viewport.documentHeight);
+    if (!state.changed && Math.hypot(dx, dy) < 0.0015) {
+      return;
+    }
+    if (!state.changed) {
+      this.pushHistory(this.options.getDocument());
+      state.changed = true;
+    }
+    const next = this.transformedSelectionBounds(state.bounds, state.handle, dx, dy);
+    const layer = this.options
+      .getDocument()
+      .layers.find((item) => item.id === this.selectedLayerId);
+    if (!layer) {
+      return;
+    }
+    const originalWidth = Math.max(0.0001, state.bounds.maxX - state.bounds.minX);
+    const originalHeight = Math.max(0.0001, state.bounds.maxY - state.bounds.minY);
+    const nextWidth = next.maxX - next.minX;
+    const nextHeight = next.maxY - next.minY;
+    for (const stroke of layer.strokes) {
+      const original = state.points.get(stroke.id);
+      if (!original) {
+        continue;
+      }
+      stroke.points = original.map((point) => ({
+        ...point,
+        x: next.minX + ((point.x - state.bounds.minX) / originalWidth) * nextWidth,
+        y: next.minY + ((point.y - state.bounds.minY) / originalHeight) * nextHeight
+      }));
+      this.strokeBounds.delete(stroke);
+    }
+    this.selectionBounds = next;
+    this.lassoPoints = this.rectanglePoints(next);
+    this.render();
+    this.selectionOverlay.setSelection(
+      this.lassoPoints,
+      next,
+      viewport.documentWidth,
+      viewport.documentHeight
+    );
+  };
+
+  private handleSelectionTransformEnd = (event: PointerEvent): void => {
+    if (
+      !this.selectionTransformState ||
+      event.pointerId !== this.selectionTransformState.pointerId
+    ) {
+      return;
+    }
+    this.endSelectionTransform();
+  };
+
+  private endSelectionTransform(): void {
+    const changed = this.selectionTransformState?.changed ?? false;
+    this.selectionTransformState = null;
+    window.removeEventListener("pointermove", this.handleSelectionTransformMove);
+    window.removeEventListener("pointerup", this.handleSelectionTransformEnd);
+    window.removeEventListener("pointercancel", this.handleSelectionTransformEnd);
+    if (changed) {
+      this.options.onDocumentChange(this.options.getDocument(), false);
+    }
+  }
+
+  private transformedSelectionBounds(
+    bounds: SelectionBounds,
+    handle: string,
+    dx: number,
+    dy: number
+  ): SelectionBounds {
+    const next = { ...bounds };
+    if (handle === "move") {
+      const moveX = Math.max(-bounds.minX, Math.min(1 - bounds.maxX, dx));
+      const moveY = Math.max(-bounds.minY, Math.min(1 - bounds.maxY, dy));
+      next.minX += moveX;
+      next.maxX += moveX;
+      next.minY += moveY;
+      next.maxY += moveY;
+      return next;
+    }
+    const minimum = 0.01;
+    if (handle.includes("w")) {
+      next.minX = Math.max(0, Math.min(bounds.maxX - minimum, bounds.minX + dx));
+    }
+    if (handle.includes("e")) {
+      next.maxX = Math.min(1, Math.max(bounds.minX + minimum, bounds.maxX + dx));
+    }
+    if (handle.includes("n")) {
+      next.minY = Math.max(0, Math.min(bounds.maxY - minimum, bounds.minY + dy));
+    }
+    if (handle.includes("s")) {
+      next.maxY = Math.min(1, Math.max(bounds.minY + minimum, bounds.maxY + dy));
+    }
+    return next;
+  }
+
+  private refreshSelectionBounds(): void {
+    const layer = this.options
+      .getDocument()
+      .layers.find((item) => item.id === this.selectedLayerId);
+    if (!layer) {
+      return;
+    }
+    this.selectionBounds = layer.strokes
+      .filter((stroke) => this.selectedStrokeIds.has(stroke.id))
+      .reduce<SelectionBounds | null>(
+        (bounds, stroke) => this.unionBounds(bounds, this.getStrokeBounds(stroke)),
+        null
+      );
+    if (!this.selectionBounds) {
+      return;
+    }
+    this.lassoPoints = this.rectanglePoints(this.selectionBounds);
+    const viewport = this.currentViewport(this.canvas.getBoundingClientRect());
+    this.selectionOverlay.setSelection(
+      this.lassoPoints,
+      this.selectionBounds,
+      viewport.documentWidth,
+      viewport.documentHeight
+    );
+  }
+
+  private rectanglePoints(bounds: SelectionBounds): StrokePoint[] {
+    return [
+      { x: bounds.minX, y: bounds.minY, pressure: 0.5 },
+      { x: bounds.maxX, y: bounds.minY, pressure: 0.5 },
+      { x: bounds.maxX, y: bounds.maxY, pressure: 0.5 },
+      { x: bounds.minX, y: bounds.maxY, pressure: 0.5 }
+    ];
   }
 
   selectAll(): void {
@@ -531,7 +753,7 @@ export class InkCanvas {
         this.context.fillRect(left, top, width, height);
       }
       for (const stroke of layer.strokes) {
-        if (stroke === this.activeStroke && this.isFreehandStroke(stroke)) {
+        if (stroke === this.activeStroke && this.isLiveStroke(stroke)) {
           continue;
         }
         if (this.options.pageIndex !== undefined && stroke.pageIndex !== this.options.pageIndex) {
@@ -582,6 +804,12 @@ export class InkCanvas {
         viewport,
         this.options.getPressureEnabled()
       );
+      context.restore();
+      return;
+    }
+
+    if (stroke.tool === "highlighter") {
+      this.drawHighlighterStroke(context, stroke, viewport);
       context.restore();
       return;
     }
@@ -949,7 +1177,7 @@ export class InkCanvas {
     const layerId = this.activeStrokeLayerId ?? document.activeLayerId;
     const strokeIndex = Math.max(0, this.activeStrokeIndex);
     const pointerId = this.activePointerId;
-    if (this.isFreehandStroke(stroke) && this.activeViewport) {
+    if (this.isLiveStroke(stroke) && this.activeViewport) {
       if (this.interactionFrame !== null) {
         window.cancelAnimationFrame(this.interactionFrame);
         this.interactionFrame = null;
@@ -1349,7 +1577,8 @@ export class InkCanvas {
         target.closest(
           "button, input, select, textarea, a, [contenteditable='true'], " +
             ".hand-note-whiteboard-controls, .hand-note-whiteboard-handle, " +
-            ".hand-note-selection-menu, .hand-note-layer-panel"
+            ".hand-note-selection-menu, .hand-note-selection-transform, " +
+            ".hand-note-selection-handle, .hand-note-layer-panel"
         ) !== null
       ) {
         return false;
@@ -1581,7 +1810,7 @@ export class InkCanvas {
       return;
     }
 
-    if (this.isFreehandStroke(this.activeStroke)) {
+    if (this.isLiveStroke(this.activeStroke)) {
       this.drawLiveStroke();
       this.renderedPointCount = this.activeStroke.points.length;
       return;
@@ -1674,9 +1903,13 @@ export class InkCanvas {
     return stroke.tool === "pen" || stroke.tool === "pencil";
   }
 
+  private isLiveStroke(stroke: AnnotationStroke): boolean {
+    return this.isFreehandStroke(stroke) || stroke.tool === "highlighter";
+  }
+
   private drawLiveStroke(): void {
     const activeStroke =
-      this.activeStroke && this.isFreehandStroke(this.activeStroke)
+      this.activeStroke && this.isLiveStroke(this.activeStroke)
         ? this.activeStroke
         : null;
     if (!activeStroke) {
@@ -1706,13 +1939,58 @@ export class InkCanvas {
     this.liveContext.globalAlpha =
       layerOpacity * (stroke.opacity ?? this.defaultOpacity(stroke.tool));
     this.liveContext.fillStyle = stroke.color;
-    drawFreehandStroke(
-      this.liveContext,
-      stroke,
-      viewport,
-      this.options.getPressureEnabled()
-    );
+    if (stroke.tool === "highlighter") {
+      this.liveContext.globalCompositeOperation = "multiply";
+      this.drawHighlighterStroke(this.liveContext, stroke, viewport);
+    } else {
+      drawFreehandStroke(
+        this.liveContext,
+        stroke,
+        viewport,
+        this.options.getPressureEnabled()
+      );
+    }
     this.liveContext.restore();
+  }
+
+  private drawHighlighterStroke(
+    context: CanvasRenderingContext2D,
+    stroke: AnnotationStroke,
+    viewport: InkCanvasViewport
+  ): void {
+    const points = stroke.points;
+    if (points.length === 0) {
+      return;
+    }
+    const coordinates = points.map((point) => ({
+      x: point.x * viewport.documentWidth - viewport.offsetX,
+      y: point.y * viewport.documentHeight - viewport.offsetY
+    }));
+    let length = 0;
+    for (let index = 1; index < coordinates.length; index += 1) {
+      length += Math.hypot(
+        coordinates[index].x - coordinates[index - 1].x,
+        coordinates[index].y - coordinates[index - 1].y
+      );
+    }
+    context.fillStyle = stroke.color;
+    context.strokeStyle = stroke.color;
+    if (length <= Math.max(2, stroke.size * 0.3)) {
+      const center = coordinates[coordinates.length - 1];
+      context.beginPath();
+      context.arc(center.x, center.y, stroke.size / 2, 0, Math.PI * 2);
+      context.fill();
+      return;
+    }
+    context.beginPath();
+    context.lineWidth = stroke.size;
+    context.lineCap = "round";
+    context.lineJoin = "round";
+    context.moveTo(coordinates[0].x, coordinates[0].y);
+    for (let index = 1; index < coordinates.length; index += 1) {
+      context.lineTo(coordinates[index].x, coordinates[index].y);
+    }
+    context.stroke();
   }
 
   private clearLiveCanvas(): void {

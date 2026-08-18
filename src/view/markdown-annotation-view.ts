@@ -21,7 +21,10 @@ import {
 import { AnnotationToolbar } from "./annotation-toolbar";
 import { InkCanvas, InkCanvasViewport } from "./ink-canvas";
 import { LayerPanel } from "./layer-panel";
-import { TemporaryWhiteboard } from "./temporary-whiteboard";
+import {
+  TemporaryWhiteboard,
+  draftFromWhiteboardLayer
+} from "./temporary-whiteboard";
 
 export const MARKDOWN_ANNOTATION_VIEW_TYPE = "hand-note-markdown-annotation";
 
@@ -32,6 +35,7 @@ export class MarkdownAnnotationView extends ItemView {
   private layerPanel: LayerPanel | null = null;
   private annotationToolbar: AnnotationToolbar | null = null;
   private whiteboard: TemporaryWhiteboard | null = null;
+  private editingWhiteboardLayerId: string | null = null;
   private activeInkTarget: "document" | "whiteboard" = "document";
   private markdownBody: HTMLDivElement;
   private surface: HTMLDivElement;
@@ -133,6 +137,7 @@ export class MarkdownAnnotationView extends ItemView {
       onAddLayer: () => this.addLayer(),
       onDeleteLayer: (layerId) => this.deleteLayer(layerId),
       onSelectLayer: (layerId) => this.selectLayer(layerId),
+      onEditWhiteboard: (layerId) => this.editWhiteboardLayer(layerId),
       onRenameLayer: (layerId, name) => this.renameLayer(layerId, name),
       onToggleVisibility: (layerId) => this.toggleVisibility(layerId),
       onOpacityChange: (layerId, opacity) => this.setLayerOpacity(layerId, opacity),
@@ -172,6 +177,7 @@ export class MarkdownAnnotationView extends ItemView {
       this.inkCanvas.canvas,
       this.inkCanvas.liveCanvas,
       this.inkCanvas.selectionOutline,
+      this.inkCanvas.selectionTransform,
       this.inkCanvas.selectionMenu
     );
     if (typeof ResizeObserver !== "undefined") {
@@ -194,6 +200,7 @@ export class MarkdownAnnotationView extends ItemView {
     await this.flushSave();
     this.whiteboard?.destroy();
     this.whiteboard = null;
+    this.editingWhiteboardLayerId = null;
     this.inkCanvas?.destroy();
     this.surfaceObserver?.disconnect();
     this.surfaceObserver = null;
@@ -403,6 +410,7 @@ export class MarkdownAnnotationView extends ItemView {
     if (!this.document) {
       return;
     }
+    this.commitEditedWhiteboard(true);
     const layer = this.document.layers.find((item) => item.id === layerId);
     if (!layer || layer.whiteboard) {
       return;
@@ -425,6 +433,10 @@ export class MarkdownAnnotationView extends ItemView {
   private toggleVisibility(layerId: string): void {
     const layer = this.document?.layers.find((item) => item.id === layerId);
     if (!layer) {
+      return;
+    }
+    if (layer.id === this.editingWhiteboardLayerId) {
+      this.commitEditedWhiteboard(true);
       return;
     }
     if (layer.id === this.document?.activeLayerId) {
@@ -523,15 +535,106 @@ export class MarkdownAnnotationView extends ItemView {
     this.annotationToolbar?.setWhiteboardActive(true);
   }
 
+  private editWhiteboardLayer(layerId: string): void {
+    if (!this.document) {
+      return;
+    }
+    if (this.editingWhiteboardLayerId === layerId && this.whiteboard) {
+      this.whiteboard.setEditing(true);
+      this.activeInkTarget = "whiteboard";
+      this.annotationToolbar?.setWhiteboardActive(true);
+      return;
+    }
+    if (this.whiteboard) {
+      if (this.editingWhiteboardLayerId) {
+        this.commitEditedWhiteboard(true);
+      } else {
+        this.updateWhiteboardDraft(this.whiteboard.getDraft());
+        this.whiteboard.destroy();
+        this.whiteboard = null;
+      }
+    }
+    const layer = this.document.layers.find((item) => item.id === layerId);
+    if (!layer?.whiteboard) {
+      return;
+    }
+    const draft = draftFromWhiteboardLayer(layer, this.surface);
+    if (!draft) {
+      return;
+    }
+    this.editingWhiteboardLayerId = layer.id;
+    layer.visible = false;
+    this.handleDocumentChange(this.document, true, false);
+    this.whiteboard = new TemporaryWhiteboard({
+      host: this.surface,
+      initialDraft: draft,
+      initialBounds: draft.bounds,
+      getTool: () => this.currentTool,
+      getColor: () => this.currentColor,
+      getSize: () => this.toolSizes[this.currentTool],
+      getEraserSize: () => this.toolSizes.eraser,
+      getEraserMode: () => this.eraserMode,
+      getPressureEnabled: () => this.pressureEnabled,
+      onActivate: () => {
+        this.activeInkTarget = "whiteboard";
+      },
+      onChange: (nextDraft) => this.updateWhiteboardDraft(nextDraft),
+      onSave: (nextLayer, nextDraft) =>
+        this.saveWhiteboardLayer(nextLayer, nextDraft.id),
+      onDelete: () => this.deleteWhiteboard(),
+      onPencilShortcut: () => this.togglePenAndEraser()
+    });
+    this.activeInkTarget = "whiteboard";
+    this.annotationToolbar?.setWhiteboardActive(true);
+  }
+
+  private commitEditedWhiteboard(hide: boolean): void {
+    const layerId = this.editingWhiteboardLayerId;
+    const whiteboard = this.whiteboard;
+    if (!layerId || !whiteboard || !this.document) {
+      return;
+    }
+    const index = this.document.layers.findIndex((layer) => layer.id === layerId);
+    if (index < 0) {
+      return;
+    }
+    const previous = this.document.layers[index];
+    const draft = whiteboard.getDraft();
+    const replacement = whiteboard.createLayer(previous.name, previous.whiteboard?.bounds.pageIndex);
+    replacement.id = previous.id;
+    replacement.name = previous.name;
+    replacement.opacity = previous.opacity;
+    replacement.visible = !hide;
+    this.document.layers[index] = replacement;
+    this.document.draftWhiteboards = (this.document.draftWhiteboards ?? []).filter(
+      (item) => item.id !== draft.id
+    );
+    whiteboard.destroy();
+    this.whiteboard = null;
+    this.editingWhiteboardLayerId = null;
+    this.activeInkTarget = "document";
+    this.annotationToolbar?.setWhiteboardActive(false);
+    this.handleDocumentChange(this.document);
+  }
+
   private deleteWhiteboard(): void {
     const draftId = this.whiteboard?.getDraft().id;
+    const editingLayerId = this.editingWhiteboardLayerId;
     this.whiteboard?.destroy();
     this.whiteboard = null;
+    this.editingWhiteboardLayerId = null;
     if (draftId && this.document) {
       this.document.draftWhiteboards = (this.document.draftWhiteboards ?? []).filter(
         (draft) => draft.id !== draftId
       );
       this.handleDocumentChange(this.document, false);
+    }
+    if (editingLayerId && this.document) {
+      this.document.layers = this.document.layers.filter(
+        (layer) => layer.id !== editingLayerId
+      );
+      getActiveLayer(this.document);
+      this.handleDocumentChange(this.document);
     }
     this.activeInkTarget = "document";
     this.annotationToolbar?.setWhiteboardActive(false);
@@ -560,16 +663,30 @@ export class MarkdownAnnotationView extends ItemView {
       return;
     }
     this.inkCanvas?.recordHistory();
-    const number =
-      this.document.layers.filter((item) => /^白板\d+$/.test(item.name)).length + 1;
-    layer.name = `白板${number}`;
-    this.document.layers.push(layer);
+    const editingLayerId = this.editingWhiteboardLayerId;
+    const existingIndex = editingLayerId
+      ? this.document.layers.findIndex((item) => item.id === editingLayerId)
+      : -1;
+    if (existingIndex >= 0) {
+      const existing = this.document.layers[existingIndex];
+      layer.id = existing.id;
+      layer.name = existing.name;
+      layer.opacity = existing.opacity;
+      layer.visible = true;
+      this.document.layers[existingIndex] = layer;
+    } else {
+      const number =
+        this.document.layers.filter((item) => /^白板\d+$/.test(item.name)).length + 1;
+      layer.name = `白板${number}`;
+      this.document.layers.push(layer);
+    }
     getActiveLayer(this.document);
     this.document.draftWhiteboards = (this.document.draftWhiteboards ?? []).filter(
       (draft) => draft.id !== draftId
     );
     this.whiteboard?.destroy();
     this.whiteboard = null;
+    this.editingWhiteboardLayerId = null;
     this.activeInkTarget = "document";
     this.annotationToolbar?.setWhiteboardActive(false);
     this.handleDocumentChange(this.document);

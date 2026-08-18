@@ -264,6 +264,65 @@
   display: flex;
 }
 
+.hand-note-selection-transform {
+  border: 1px dashed var(--interactive-accent);
+  box-sizing: border-box;
+  cursor: move;
+  display: none;
+  position: absolute;
+  touch-action: none;
+  z-index: 5;
+}
+
+.hand-note-selection-transform.is-visible {
+  display: block;
+}
+
+.hand-note-selection-handle {
+  background: var(--interactive-accent);
+  border: 2px solid var(--background-primary);
+  border-radius: 50%;
+  height: 14px;
+  padding: 0;
+  position: absolute;
+  touch-action: none;
+  width: 14px;
+}
+
+.hand-note-selection-handle.is-nw,
+.hand-note-selection-handle.is-w,
+.hand-note-selection-handle.is-sw {
+  left: -7px;
+}
+
+.hand-note-selection-handle.is-ne,
+.hand-note-selection-handle.is-e,
+.hand-note-selection-handle.is-se {
+  right: -7px;
+}
+
+.hand-note-selection-handle.is-n,
+.hand-note-selection-handle.is-s {
+  left: calc(50% - 7px);
+}
+
+.hand-note-selection-handle.is-w,
+.hand-note-selection-handle.is-e {
+  top: calc(50% - 7px);
+}
+
+.hand-note-selection-handle.is-nw,
+.hand-note-selection-handle.is-n,
+.hand-note-selection-handle.is-ne {
+  top: -7px;
+}
+
+.hand-note-selection-handle.is-sw,
+.hand-note-selection-handle.is-s,
+.hand-note-selection-handle.is-se {
+  bottom: -7px;
+}
+
 .hand-note-whiteboard {
   background: #ffffff;
   border: 1px solid var(--background-modifier-border);
@@ -525,12 +584,6 @@
   flex: 0 0 36px;
   font-size: var(--font-ui-smaller);
   text-align: right;
-}
-
-.hand-note-layer-row.is-whiteboard .hand-note-layer-name::after {
-  color: var(--text-muted);
-  content: " · 锁定";
-  font-size: var(--font-ui-smaller);
 }
 
 .hand-note-layer-footer {

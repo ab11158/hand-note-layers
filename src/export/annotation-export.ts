@@ -1,12 +1,19 @@
 import { App, TFile, normalizePath } from "obsidian";
+import { PDFDocument } from "pdf-lib";
 import { AnnotationDocument, cloneDocument } from "../model/annotation";
 import { getAnnotationPath, loadAnnotation } from "../storage/annotation-store";
+import { drawFreehandStroke } from "../view/freehand-renderer";
 
 const EXPORT_ROOT = "Hand Note Layers 导出";
 
 export interface AnnotationExportResult {
   directory: string;
   exportedFiles: number;
+  excludedDraftWhiteboards: number;
+}
+
+export interface PdfExportResult {
+  path: string;
   excludedDraftWhiteboards: number;
 }
 
@@ -152,6 +159,160 @@ function withoutDraftWhiteboards(document: AnnotationDocument): AnnotationDocume
   const exported = cloneDocument(document);
   exported.draftWhiteboards = [];
   return exported;
+}
+
+function canvasPng(canvas: HTMLCanvasElement): Promise<ArrayBuffer> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error("Unable to encode annotation overlay"));
+        return;
+      }
+      void blob.arrayBuffer().then(resolve, reject);
+    }, "image/png");
+  });
+}
+
+function drawCanvasStroke(
+  context: CanvasRenderingContext2D,
+  stroke: AnnotationDocument["layers"][number]["strokes"][number],
+  width: number,
+  height: number,
+  layerOpacity: number
+): void {
+  if (stroke.points.length === 0) {
+    return;
+  }
+  context.save();
+  context.globalAlpha =
+    layerOpacity * (stroke.opacity ?? (stroke.tool === "highlighter" ? 0.32 : 1));
+  context.fillStyle = stroke.color;
+  context.strokeStyle = stroke.color;
+  if (stroke.tool === "pen" || stroke.tool === "pencil") {
+    drawFreehandStroke(
+      context,
+      stroke,
+      {
+        documentWidth: width,
+        documentHeight: height,
+        offsetX: 0,
+        offsetY: 0,
+        width,
+        height
+      },
+      true
+    );
+    context.restore();
+    return;
+  }
+  const points = stroke.points.map((point) => ({
+    x: point.x * width,
+    y: point.y * height
+  }));
+  if (points.length === 1) {
+    context.beginPath();
+    context.arc(points[0].x, points[0].y, stroke.size / 2, 0, Math.PI * 2);
+    context.fill();
+    context.restore();
+    return;
+  }
+  context.globalCompositeOperation =
+    stroke.tool === "highlighter" ? "multiply" : "source-over";
+  context.lineWidth = stroke.size;
+  context.lineCap = "round";
+  context.lineJoin = "round";
+  context.beginPath();
+  context.moveTo(points[0].x, points[0].y);
+  for (let index = 1; index < points.length; index += 1) {
+    context.lineTo(points[index].x, points[index].y);
+  }
+  context.stroke();
+  context.restore();
+}
+
+async function renderPdfOverlay(
+  document: AnnotationDocument,
+  pageIndex: number,
+  width: number,
+  height: number
+): Promise<ArrayBuffer | null> {
+  const visibleLayers = document.layers.filter(
+    (layer) =>
+      layer.visible &&
+      layer.opacity > 0 &&
+      (layer.strokes.some((stroke) => stroke.pageIndex === pageIndex) ||
+        layer.whiteboard?.bounds.pageIndex === pageIndex)
+  );
+  if (visibleLayers.length === 0) {
+    return null;
+  }
+  const scale = Math.max(1, Math.min(2, Math.sqrt(5_000_000 / (width * height))));
+  const canvas = window.document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+  const context = canvas.getContext("2d");
+  if (!context) {
+    throw new Error("Unable to create PDF annotation canvas");
+  }
+  context.scale(scale, scale);
+  for (const layer of visibleLayers) {
+    context.save();
+    const whiteboard = layer.whiteboard;
+    if (whiteboard?.bounds.pageIndex === pageIndex) {
+      const bounds = whiteboard.bounds;
+      const left = bounds.minX * width;
+      const top = bounds.minY * height;
+      const boardWidth = (bounds.maxX - bounds.minX) * width;
+      const boardHeight = (bounds.maxY - bounds.minY) * height;
+      context.beginPath();
+      context.rect(left, top, boardWidth, boardHeight);
+      context.clip();
+      context.globalAlpha = layer.opacity;
+      context.fillStyle = whiteboard.background;
+      context.fillRect(left, top, boardWidth, boardHeight);
+    }
+    for (const stroke of layer.strokes) {
+      if (stroke.pageIndex === pageIndex) {
+        drawCanvasStroke(context, stroke, width, height, layer.opacity);
+      }
+    }
+    context.restore();
+  }
+  return canvasPng(canvas);
+}
+
+export async function exportAnnotatedPdf(
+  app: App,
+  source: TFile,
+  document: AnnotationDocument
+): Promise<PdfExportResult> {
+  const sourceBytes = await app.vault.readBinary(source);
+  const pdf = await PDFDocument.load(sourceBytes);
+  const pages = pdf.getPages();
+  for (let index = 0; index < pages.length; index += 1) {
+    const page = pages[index];
+    const width = page.getWidth();
+    const height = page.getHeight();
+    const overlay = await renderPdfOverlay(document, index + 1, width, height);
+    if (!overlay) {
+      continue;
+    }
+    const image = await pdf.embedPng(overlay);
+    page.drawImage(image, { x: 0, y: 0, width, height });
+  }
+  const directory = normalizePath(
+    `${EXPORT_ROOT}/${exportTimestamp()}-${source.basename}`
+  );
+  await ensureFolder(app, directory);
+  const path = normalizePath(`${directory}/${source.basename}-带批注.pdf`);
+  const bytes = await pdf.save();
+  const output = new Uint8Array(bytes.byteLength);
+  output.set(bytes);
+  await app.vault.adapter.writeBinary(path, output.buffer);
+  return {
+    path,
+    excludedDraftWhiteboards: document.draftWhiteboards?.length ?? 0
+  };
 }
 
 async function exportOne(

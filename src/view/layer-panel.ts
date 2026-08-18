@@ -5,6 +5,7 @@ export interface LayerPanelCallbacks {
   onAddLayer: () => void;
   onDeleteLayer: (layerId: string) => void;
   onSelectLayer: (layerId: string) => void;
+  onEditWhiteboard: (layerId: string) => void;
   onRenameLayer: (layerId: string, name: string) => void;
   onToggleVisibility: (layerId: string) => void;
   onOpacityChange: (layerId: string, opacity: number) => void;
@@ -84,16 +85,11 @@ export class LayerPanel {
     name.className = "hand-note-layer-name";
     name.textContent = layer.name;
     name.title = "双击重命名";
-    let clickTimer: number | null = null;
     let longPressTimer: number | null = null;
     let longPressStart: { x: number; y: number } | null = null;
     const startRename = (event?: Event) => {
       event?.preventDefault();
       event?.stopPropagation();
-      if (clickTimer !== null) {
-        window.clearTimeout(clickTimer);
-        clickTimer = null;
-      }
       const input = document.createElement("input");
       input.type = "text";
       input.value = layer.name;
@@ -121,16 +117,7 @@ export class LayerPanel {
         }
       });
     };
-    name.addEventListener("click", (event) => {
-      event.stopPropagation();
-      if (clickTimer !== null) {
-        window.clearTimeout(clickTimer);
-      }
-      clickTimer = window.setTimeout(() => {
-        clickTimer = null;
-        this.callbacks.onSelectLayer(layer.id);
-      }, 220);
-    });
+    name.addEventListener("click", (event) => event.stopPropagation());
     name.addEventListener("dblclick", startRename);
     name.addEventListener("contextmenu", startRename);
     name.addEventListener("pointerdown", (event) => {
@@ -165,9 +152,9 @@ export class LayerPanel {
     const opacity = document.createElement("input");
     opacity.type = "range";
     opacity.min = "0";
-    opacity.max = "1";
-    opacity.step = "0.01";
-    opacity.value = String(layer.opacity);
+    opacity.max = "100";
+    opacity.step = "1";
+    opacity.value = String(Math.round(layer.opacity * 100));
     opacity.setAttribute("aria-label", "图层透明度");
     opacity.className = "hand-note-layer-opacity";
     const opacityValue = document.createElement("span");
@@ -175,8 +162,8 @@ export class LayerPanel {
     opacityValue.textContent = `${Math.round(layer.opacity * 100)}%`;
     opacity.addEventListener("input", () => {
       const value = Number(opacity.value);
-      opacityValue.textContent = `${Math.round(value * 100)}%`;
-      this.callbacks.onOpacityChange(layer.id, value);
+      opacityValue.textContent = `${value}%`;
+      this.callbacks.onOpacityChange(layer.id, value / 100);
     });
 
     const opacityRow = document.createElement("div");
@@ -197,12 +184,17 @@ export class LayerPanel {
 
     const editButton = createIconButton("pen", "设为当前编辑图层");
     editButton.classList.toggle("is-active", active);
-    editButton.disabled = whiteboard;
     if (whiteboard) {
-      editButton.setAttribute("aria-label", "白板图层已锁定");
-      editButton.title = "白板图层已锁定";
+      editButton.setAttribute("aria-label", "编辑白板图层");
+      editButton.title = "编辑白板图层";
     }
-    editButton.addEventListener("click", () => this.callbacks.onSelectLayer(layer.id));
+    editButton.addEventListener("click", () => {
+      if (whiteboard) {
+        this.callbacks.onEditWhiteboard(layer.id);
+      } else {
+        this.callbacks.onSelectLayer(layer.id);
+      }
+    });
 
     content.append(name, opacityRow);
     row.append(visibilityButton, content, editButton, moveUp, moveDown, deleteButton);
