@@ -78,6 +78,7 @@ export class InkCanvas {
   private activeStroke: AnnotationStroke | null = null;
   private activePointerId: number | null = null;
   private activePointerKind: "draw" | "pan" | null = null;
+  private activeSimpleContact = false;
   private activeTool: AnnotationTool | null = null;
   private eraserChanged = false;
   private undoStack: InkHistoryEntry[] = [];
@@ -190,6 +191,7 @@ export class InkCanvas {
     this.activeStroke = null;
     this.activePointerId = null;
     this.activePointerKind = null;
+    this.activeSimpleContact = false;
     this.activeTool = null;
     this.eraserChanged = false;
     this.activeRect = null;
@@ -639,12 +641,6 @@ export class InkCanvas {
     if (tool === "hand") {
       return;
     }
-    if (this.isStylusShortcut(event)) {
-      event.preventDefault();
-      this.options.onPencilShortcut?.();
-      return;
-    }
-
     const document = this.options.getDocument();
     const layer = getActiveLayer(document);
     if (!layer || !layer.visible || layer.opacity <= 0) {
@@ -655,6 +651,7 @@ export class InkCanvas {
     this.canvas.setPointerCapture(event.pointerId);
     this.activePointerId = event.pointerId;
     this.activePointerKind = "draw";
+    this.activeSimpleContact = event.pointerType === "pen";
     this.activeTool = tool;
     this.options.onActivate?.();
     this.activeRect = this.cachedRect ?? this.canvas.getBoundingClientRect();
@@ -722,7 +719,8 @@ export class InkCanvas {
       time: firstInkAt,
       pointerId: event.pointerId,
       pointerType: event.pointerType,
-      firstInkMs: firstInkAt - receivedAt
+      firstInkMs: firstInkAt - receivedAt,
+      detail: this.activeSimpleContact ? "simple-contact" : undefined
     });
   };
 
@@ -762,7 +760,11 @@ export class InkCanvas {
     }
 
     this.collectStrokePoints(event);
-    this.scheduleInteractionFrame();
+    if (this.activeSimpleContact) {
+      this.flushInteractionFrame();
+    } else {
+      this.scheduleInteractionFrame();
+    }
   };
 
   private handlePointerUp = (event: PointerEvent): void => {
@@ -832,6 +834,7 @@ export class InkCanvas {
   private resetPointerState(): void {
     this.activePointerId = null;
     this.activePointerKind = null;
+    this.activeSimpleContact = false;
     this.activeTool = null;
     this.activeRect = null;
     this.activeViewport = null;
@@ -984,13 +987,6 @@ export class InkCanvas {
     }));
   }
 
-  private isStylusShortcut(event: PointerEvent): boolean {
-    return (
-      event.pointerType === "pen" &&
-      (event.button === 2 || event.button === 5 || (event.buttons & 34) !== 0)
-    );
-  }
-
   private strokeHitTest(stroke: AnnotationStroke, point: StrokePoint, radius: number): boolean {
     const rect = this.activeRect ?? this.canvas.getBoundingClientRect();
     const viewport = this.activeViewport ?? this.currentViewport(rect);
@@ -1081,7 +1077,7 @@ export class InkCanvas {
     return {
       x: Math.max(0, Math.min(1, x)),
       y: Math.max(0, Math.min(1, y)),
-      pressure: event.pressure || (event.pointerType === "pen" ? 0.5 : 0.5)
+      pressure: this.activeSimpleContact ? 0.5 : event.pressure || 0.5
     };
   }
 
@@ -1372,6 +1368,9 @@ export class InkCanvas {
   }
 
   private coalescedEvents(event: PointerEvent): PointerEvent[] {
+    if (this.activeSimpleContact) {
+      return this.hasUsableCoordinates(event) ? [event] : [];
+    }
     const samples = event.getCoalescedEvents?.();
     if (!samples || samples.length === 0) {
       return this.hasUsableCoordinates(event) ? [event] : [];
