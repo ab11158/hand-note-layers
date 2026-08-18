@@ -753,7 +753,7 @@ export class PdfAnnotationView extends ItemView {
       this.document.layers.filter((item) => /^白板\d+$/.test(item.name)).length + 1;
     layer.name = `白板${number}`;
     this.document.layers.push(layer);
-    this.document.activeLayerId = layer.id;
+    getActiveLayer(this.document);
     this.document.draftWhiteboards = (this.document.draftWhiteboards ?? []).filter(
       (draft) => draft.id !== draftId
     );
@@ -774,8 +774,9 @@ export class PdfAnnotationView extends ItemView {
     );
   }
 
-  getInputDiagnostics(): unknown[] {
-    return this.currentInkCanvas()?.getInputDiagnostics() ?? [];
+  async prepareExport(): Promise<TFile | null> {
+    await this.flushSave();
+    return this.sourceFile;
   }
 
   private handleDocumentChange(
@@ -854,7 +855,7 @@ export class PdfAnnotationView extends ItemView {
     this.currentDocumentInkCanvas()?.recordHistory();
     this.document.layers = this.document.layers.filter((layer) => layer.id !== layerId);
     if (this.document.activeLayerId === layerId) {
-      this.document.activeLayerId = this.document.layers[0].id;
+      getActiveLayer(this.document);
     }
     this.handleDocumentChange(this.document);
   }
@@ -863,6 +864,11 @@ export class PdfAnnotationView extends ItemView {
     if (!this.document) {
       return;
     }
+    const layer = this.document.layers.find((item) => item.id === layerId);
+    if (!layer || layer.whiteboard) {
+      return;
+    }
+    layer.visible = true;
     this.document.activeLayerId = layerId;
     this.handleDocumentChange(this.document);
   }
@@ -882,6 +888,11 @@ export class PdfAnnotationView extends ItemView {
     if (!layer) {
       return;
     }
+    if (layer.id === this.document?.activeLayerId) {
+      layer.visible = true;
+      this.layerPanel?.setDocument(this.document as AnnotationDocument);
+      return;
+    }
     this.currentDocumentInkCanvas()?.recordHistory();
     layer.visible = !layer.visible;
     this.handleDocumentChange(this.document as AnnotationDocument);
@@ -893,7 +904,7 @@ export class PdfAnnotationView extends ItemView {
       return;
     }
     layer.opacity = opacity;
-    this.handleDocumentChange(this.document as AnnotationDocument);
+    this.handleDocumentChange(this.document as AnnotationDocument, true, false);
   }
 
   private moveLayer(layerId: string, direction: -1 | 1): void {

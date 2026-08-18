@@ -60,13 +60,21 @@ export class LayerPanel {
   }
 
   private createLayerRow(layer: AnnotationLayer, index: number): HTMLElement {
+    const active = layer.id === this.annotationDocument.activeLayerId;
+    const whiteboard = Boolean(layer.whiteboard);
     const row = document.createElement("div");
     row.className = "hand-note-layer-row";
-    row.classList.toggle("is-active", layer.id === this.annotationDocument.activeLayerId);
+    row.classList.toggle("is-active", active);
     row.classList.toggle("is-hidden", !layer.visible);
+    row.classList.toggle("is-whiteboard", whiteboard);
 
     const visibilityButton = createIconButton(layer.visible ? "eye" : "eye-off", layer.visible ? "隐藏图层" : "显示图层");
     visibilityButton.classList.toggle("is-active", layer.visible);
+    visibilityButton.disabled = active;
+    if (active) {
+      visibilityButton.setAttribute("aria-label", "当前编辑图层始终可见");
+      visibilityButton.title = "当前编辑图层始终可见";
+    }
     visibilityButton.addEventListener("click", () => this.callbacks.onToggleVisibility(layer.id));
 
     const content = document.createElement("div");
@@ -158,11 +166,22 @@ export class LayerPanel {
     opacity.type = "range";
     opacity.min = "0";
     opacity.max = "1";
-    opacity.step = "0.05";
+    opacity.step = "0.01";
     opacity.value = String(layer.opacity);
     opacity.setAttribute("aria-label", "图层透明度");
     opacity.className = "hand-note-layer-opacity";
-    opacity.addEventListener("input", () => this.callbacks.onOpacityChange(layer.id, Number(opacity.value)));
+    const opacityValue = document.createElement("span");
+    opacityValue.className = "hand-note-layer-opacity-value";
+    opacityValue.textContent = `${Math.round(layer.opacity * 100)}%`;
+    opacity.addEventListener("input", () => {
+      const value = Number(opacity.value);
+      opacityValue.textContent = `${Math.round(value * 100)}%`;
+      this.callbacks.onOpacityChange(layer.id, value);
+    });
+
+    const opacityRow = document.createElement("div");
+    opacityRow.className = "hand-note-layer-opacity-row";
+    opacityRow.append(opacity, opacityValue);
 
     const moveUp = createIconButton("chevron-up", "上移图层");
     moveUp.disabled = index === this.annotationDocument.layers.length - 1;
@@ -177,13 +196,15 @@ export class LayerPanel {
     deleteButton.addEventListener("click", () => this.callbacks.onDeleteLayer(layer.id));
 
     const editButton = createIconButton("pen", "设为当前编辑图层");
-    editButton.classList.toggle(
-      "is-active",
-      layer.id === this.annotationDocument.activeLayerId
-    );
+    editButton.classList.toggle("is-active", active);
+    editButton.disabled = whiteboard;
+    if (whiteboard) {
+      editButton.setAttribute("aria-label", "白板图层已锁定");
+      editButton.title = "白板图层已锁定";
+    }
     editButton.addEventListener("click", () => this.callbacks.onSelectLayer(layer.id));
 
-    content.append(name, opacity);
+    content.append(name, opacityRow);
     row.append(visibilityButton, content, editButton, moveUp, moveDown, deleteButton);
     return row;
   }

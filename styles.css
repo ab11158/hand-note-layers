@@ -508,8 +508,29 @@
   width: 100%;
 }
 
+.hand-note-layer-opacity-row {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
 .hand-note-layer-opacity {
-  width: 100%;
+  flex: 1 1 auto;
+  height: 28px;
+  min-width: 0;
+  touch-action: pan-y;
+}
+
+.hand-note-layer-opacity-value {
+  flex: 0 0 36px;
+  font-size: var(--font-ui-smaller);
+  text-align: right;
+}
+
+.hand-note-layer-row.is-whiteboard .hand-note-layer-name::after {
+  color: var(--text-muted);
+  content: " · 锁定";
+  font-size: var(--font-ui-smaller);
 }
 
 .hand-note-layer-footer {

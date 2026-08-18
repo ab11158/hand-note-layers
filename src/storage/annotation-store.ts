@@ -1,7 +1,8 @@
 import { App, TFile, normalizePath } from "obsidian";
 import {
   AnnotationDocument,
-  createEmptyDocument
+  createEmptyDocument,
+  getActiveLayer
 } from "../model/annotation";
 
 const ANNOTATION_ROOT = ".hand-note-layers";
@@ -48,7 +49,7 @@ function migrateDocument(value: unknown, sourcePath: string): AnnotationDocument
     return createEmptyDocument(sourcePath);
   }
 
-  return {
+  const document: AnnotationDocument = {
     schemaVersion: 1,
     sourcePath: candidate.sourcePath ?? sourcePath,
     layers: candidate.layers.map((layer) => ({
@@ -85,6 +86,8 @@ function migrateDocument(value: unknown, sourcePath: string): AnnotationDocument
       ? candidate.draftWhiteboards
       : []
   };
+  getActiveLayer(document);
+  return document;
 }
 
 export async function loadAnnotation(

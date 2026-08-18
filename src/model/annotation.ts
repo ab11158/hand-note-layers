@@ -115,8 +115,20 @@ export function cloneDocument(document: AnnotationDocument): AnnotationDocument 
 }
 
 export function getActiveLayer(document: AnnotationDocument): AnnotationLayer {
-  return (
-    document.layers.find((layer) => layer.id === document.activeLayerId) ??
-    document.layers[0]
+  const active = document.layers.find(
+    (layer) => layer.id === document.activeLayerId && !layer.whiteboard
   );
+  if (active) {
+    active.visible = true;
+    return active;
+  }
+
+  let editable = document.layers.find((layer) => !layer.whiteboard);
+  if (!editable) {
+    editable = createLayer(nextLayerName(document));
+    document.layers.push(editable);
+  }
+  editable.visible = true;
+  document.activeLayerId = editable.id;
+  return editable;
 }

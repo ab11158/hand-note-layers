@@ -1,4 +1,9 @@
 import { Notice, Plugin, TFile } from "obsidian";
+import {
+  AnnotationExportResult,
+  exportCurrentAnnotation,
+  exportVaultAnnotations
+} from "./export/annotation-export";
 import { deleteAnnotation } from "./storage/annotation-store";
 import {
   MARKDOWN_ANNOTATION_VIEW_TYPE,
@@ -81,39 +86,25 @@ export default class HandNoteLayersPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "copy-input-diagnostics",
-      name: "复制 Apple Pencil 输入诊断记录",
+      id: "export-current-annotation",
+      name: "导出当前文件（保留 Hand Note Layers 图层）",
       checkCallback: (checking) => {
         const view = this.getActiveAnnotationView();
-        if (!view) {
+        const file = view ? null : this.app.workspace.getActiveFile();
+        if (!view && (!file || !this.isSupported(file))) {
           return false;
         }
         if (!checking) {
-          const diagnostics = JSON.stringify(
-            {
-              capturedAt: new Date().toISOString(),
-              pluginVersion: this.manifest.version,
-              file: this.app.workspace.getActiveFile()?.path ?? null,
-              userAgent: navigator.userAgent,
-              devicePixelRatio: window.devicePixelRatio,
-              visibilityState: document.visibilityState,
-              records: view.getInputDiagnostics()
-            },
-            null,
-            2
-          );
-          console.info("Hand Note Layers Apple Pencil diagnostics", diagnostics);
-          if (!navigator.clipboard) {
-            new Notice("诊断记录已输出到开发者控制台");
-            return;
-          }
-          void navigator.clipboard
-            .writeText(diagnostics)
-            .then(() => new Notice("Apple Pencil 诊断记录已复制"))
-            .catch(() => new Notice("诊断记录已输出到开发者控制台"));
+          void this.exportCurrentFile(view, file);
         }
         return true;
       }
+    });
+
+    this.addCommand({
+      id: "export-vault-annotations",
+      name: "导出整个仓库的 Hand Note Layers 文件",
+      callback: () => void this.exportWholeVault()
     });
 
     const handlePencilDoubleTap = () => {
@@ -139,6 +130,52 @@ export default class HandNoteLayersPlugin extends Plugin {
     return view instanceof MarkdownAnnotationView || view instanceof PdfAnnotationView
       ? view
       : null;
+  }
+
+  private async exportCurrentFile(
+    view: MarkdownAnnotationView | PdfAnnotationView | null,
+    fallbackFile: TFile | null
+  ): Promise<void> {
+    try {
+      const file = view ? await view.prepareExport() : fallbackFile;
+      if (!file) {
+        new Notice("没有可导出的文件");
+        return;
+      }
+      this.showExportResult(await exportCurrentAnnotation(this.app, file));
+    } catch (error) {
+      console.error("Hand Note Layers: failed to export current file", error);
+      new Notice("当前文件导出失败，请查看开发者控制台");
+    }
+  }
+
+  private async exportWholeVault(): Promise<void> {
+    try {
+      const annotationViews = [
+        ...this.app.workspace.getLeavesOfType(MARKDOWN_ANNOTATION_VIEW_TYPE),
+        ...this.app.workspace.getLeavesOfType(PDF_ANNOTATION_VIEW_TYPE)
+      ]
+        .map((leaf) => leaf.view)
+        .filter(
+          (view): view is MarkdownAnnotationView | PdfAnnotationView =>
+            view instanceof MarkdownAnnotationView || view instanceof PdfAnnotationView
+        );
+      await Promise.all(annotationViews.map((view) => view.prepareExport()));
+      this.showExportResult(await exportVaultAnnotations(this.app));
+    } catch (error) {
+      console.error("Hand Note Layers: failed to export vault", error);
+      new Notice("仓库导出失败，请查看开发者控制台");
+    }
+  }
+
+  private showExportResult(result: AnnotationExportResult): void {
+    const drafts = result.excludedDraftWhiteboards
+      ? `，已排除 ${result.excludedDraftWhiteboards} 个未保存白板`
+      : "";
+    new Notice(
+      `已导出 ${result.exportedFiles} 个文件到 ${result.directory}${drafts}`,
+      8000
+    );
   }
 
   private openAnnotation(file: TFile): void {
