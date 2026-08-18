@@ -71,11 +71,37 @@ type InkHistoryEntry =
       index: number;
     };
 
+interface PendingStrokeCommit {
+  document: AnnotationDocument;
+  firstMoveAt: number | null;
+  layerId: string;
+  layerOpacity: number;
+  moveCount: number;
+  pointerId: number | null;
+  pointerType: string;
+  reason: string;
+  sealedAt: number;
+  startedAt: number;
+  stroke: AnnotationStroke;
+  strokeIndex: number;
+  viewport: InkCanvasViewport;
+  visualCommitted: boolean;
+}
+
+interface InkInputSlot {
+  commit: PendingStrokeCommit | null;
+  id: number;
+  pointerId: number | null;
+  state: "free" | "active" | "sealed" | "processing";
+}
+
 export class InkCanvas {
   private static readonly MAX_CANVAS_PIXELS = 12_000_000;
   private static readonly MAX_CANVAS_DIMENSION = 16_384;
   private static readonly MAX_LASSO_POINTS = 192;
-  private static readonly MAX_INPUT_DIAGNOSTICS = 600;
+  private static readonly MAX_INPUT_DIAGNOSTICS = 2400;
+  private static readonly INPUT_SLOT_COUNT = 8;
+  private static readonly HANDWRITING_BURST_MS = 150;
 
   readonly canvas: HTMLCanvasElement;
   readonly liveCanvas: HTMLCanvasElement;
@@ -124,6 +150,13 @@ export class InkCanvas {
   private activeStrokeDocument: AnnotationDocument | null = null;
   private activeStrokePathLength = 0;
   private activeSmoothedPressure = 0.5;
+  private activeStrokeSlotId: number | null = null;
+  private readonly inputSlots: InkInputSlot[] = Array.from(
+    { length: InkCanvas.INPUT_SLOT_COUNT },
+    (_, id) => ({ commit: null, id, pointerId: null, state: "free" })
+  );
+  private readonly sealedStrokeSlots: number[] = [];
+  private strokeFinalizeTimer: number | null = null;
   private lastStrokeEndedAt: number | null = null;
   private readonly inputDiagnostics = new Array<InkInputDiagnostic>(
     InkCanvas.MAX_INPUT_DIAGNOSTICS
@@ -229,11 +262,13 @@ export class InkCanvas {
       window.cancelAnimationFrame(frame);
     }
     this.diagnosticFrames.clear();
+    this.flushSealedStrokes();
     this.flushDocumentPublish();
     this.stopPanInertia();
   }
 
   setDocument(_document: AnnotationDocument): void {
+    this.flushSealedStrokes();
     this.activeStroke = null;
     this.activePointerId = null;
     this.activePointerKind = null;
@@ -246,6 +281,7 @@ export class InkCanvas {
     this.activeViewport = null;
     this.renderedPointCount = 0;
     this.pendingEraserPoints = [];
+    this.activeStrokeSlotId = null;
     this.clearActiveStrokeMetadata();
     this.clearLiveCanvas();
     this.cancelSelection();
@@ -307,7 +343,7 @@ export class InkCanvas {
   }
 
   isInteracting(): boolean {
-    return this.activePointerKind === "draw";
+    return this.activePointerKind === "draw" || this.sealedStrokeSlots.length > 0;
   }
 
   getInputDiagnostics(): InkInputDiagnostic[] {
@@ -404,6 +440,7 @@ export class InkCanvas {
   }
 
   undo(): void {
+    this.flushSealedStrokes();
     const previous = this.undoStack.pop();
     if (!previous) {
       return;
@@ -436,6 +473,7 @@ export class InkCanvas {
   }
 
   redo(): void {
+    this.flushSealedStrokes();
     const next = this.redoStack.pop();
     if (!next) {
       return;
@@ -553,6 +591,12 @@ export class InkCanvas {
     }
 
     this.context.globalAlpha = 1;
+    for (const slotId of this.sealedStrokeSlots) {
+      const commit = this.inputSlots[slotId]?.commit;
+      if (commit) {
+        commit.visualCommitted = true;
+      }
+    }
     this.renderedPointCount = 0;
     this.drawLiveStroke();
   }
@@ -691,7 +735,7 @@ export class InkCanvas {
         detail: `replaced-pointer:${this.activePointerId}`
       });
       if (this.activePointerKind === "draw" && this.activeStroke) {
-        this.finalizeActiveStroke("superseded");
+        this.sealActiveStroke("superseded", event.pointerType, receivedAt);
       } else {
         const stalePointerId = this.activePointerId;
         this.resetPointerState();
@@ -719,6 +763,9 @@ export class InkCanvas {
     if (tool === "hand") {
       return;
     }
+    if (tool === "pen" || tool === "pencil" || tool === "highlighter") {
+      this.deferStrokeBatchFinalize();
+    }
     const document = this.options.getDocument();
     const layer = getActiveLayer(document);
     if (!layer || !layer.visible || layer.opacity <= 0) {
@@ -726,6 +773,7 @@ export class InkCanvas {
     }
 
     this.deferPendingDocumentPublish();
+    const hotPathStartedAt = performance.now();
     event.preventDefault();
     this.canvas.setPointerCapture(event.pointerId);
     this.activePointerId = event.pointerId;
@@ -797,6 +845,8 @@ export class InkCanvas {
     this.activeStrokeLayerId = layer.id;
     this.activeStrokeLayerOpacity = layer.opacity;
     this.activeStrokeDocument = document;
+    const inputSlot = this.acquireInputSlot(event.pointerId, event.pointerType, receivedAt);
+    this.activeStrokeSlotId = inputSlot.id;
     layer.strokes.push(this.activeStroke);
     this.options.onInteraction?.("stroke-start");
     this.flushInteractionFrame();
@@ -872,10 +922,11 @@ export class InkCanvas {
       return;
     }
 
+    const hotPathStartedAt = performance.now();
     event.preventDefault();
     this.recordInputDiagnostic({
       event: "pointerup-received",
-      time: performance.now(),
+      time: hotPathStartedAt,
       pointerId: event.pointerId,
       pointerType: event.pointerType,
       eventTimestamp: event.timeStamp,
@@ -902,7 +953,7 @@ export class InkCanvas {
       this.collectEraserPoints(event);
     } else if (this.activeStroke) {
       this.collectStrokePoints(event, true);
-      this.finalizeActiveStroke("pointerup", event.pointerType);
+      this.sealActiveStroke("pointerup", event.pointerType, hotPathStartedAt);
       return;
     }
     this.flushPendingInteraction();
@@ -931,10 +982,11 @@ export class InkCanvas {
       return;
     }
 
+    const hotPathStartedAt = performance.now();
     event.preventDefault();
     this.recordInputDiagnostic({
       event: "pointercancel-received",
-      time: performance.now(),
+      time: hotPathStartedAt,
       pointerId: event.pointerId,
       pointerType: event.pointerType,
       eventTimestamp: event.timeStamp,
@@ -942,7 +994,7 @@ export class InkCanvas {
     });
 
     if (this.activePointerKind === "draw" && this.activeStroke) {
-      this.finalizeActiveStroke("pointercancel", event.pointerType);
+      this.sealActiveStroke("pointercancel", event.pointerType, hotPathStartedAt);
       return;
     }
 
@@ -986,50 +1038,212 @@ export class InkCanvas {
     this.pendingEraserPoints = [];
   }
 
-  private finalizeActiveStroke(reason: string, pointerType = "pen"): void {
+  private sealActiveStroke(
+    reason: string,
+    pointerType = "pen",
+    hotPathStartedAt = performance.now()
+  ): void {
     const stroke = this.activeStroke;
     if (!stroke) {
       return;
     }
-    this.flushPendingInteraction();
+    if (this.interactionFrame !== null) {
+      window.cancelAnimationFrame(this.interactionFrame);
+      this.interactionFrame = null;
+    }
     const document = this.activeStrokeDocument ?? this.options.getDocument();
     const layerId = this.activeStrokeLayerId ?? document.activeLayerId;
     const strokeIndex = Math.max(0, this.activeStrokeIndex);
     const pointerId = this.activePointerId;
     const firstMoveAt = this.activeFirstMoveAt;
     const moveCount = this.activeMoveCount;
-    if (this.isFreehandStroke(stroke) && this.activeViewport) {
-      this.drawStroke(stroke, this.activeViewport, this.activeStrokeLayerOpacity);
-      this.clearLiveCanvas();
-    }
+    const viewport =
+      this.activeViewport ??
+      this.currentViewport(this.activeRect ?? this.canvas.getBoundingClientRect());
+    const slot = this.inputSlotForActiveStroke(pointerId, pointerType, hotPathStartedAt);
+    const sealedAt = performance.now();
+    slot.state = "sealed";
+    slot.pointerId = pointerId;
+    slot.commit = {
+      document,
+      firstMoveAt,
+      layerId,
+      layerOpacity: this.activeStrokeLayerOpacity,
+      moveCount,
+      pointerId,
+      pointerType,
+      reason,
+      sealedAt,
+      startedAt: this.strokeStartedAt,
+      stroke,
+      strokeIndex,
+      viewport,
+      visualCommitted: false
+    };
+    this.sealedStrokeSlots.push(slot.id);
     this.activeStroke = null;
+    this.activeStrokeSlotId = null;
     this.resetPointerState();
     if (pointerId !== null && this.canvas.hasPointerCapture(pointerId)) {
       this.canvas.releasePointerCapture(pointerId);
     }
     const endedAt = performance.now();
     this.lastStrokeEndedAt = endedAt;
-    this.pushHistoryEntry({
-      kind: "stroke-add",
-      layerId,
-      stroke,
-      index: strokeIndex
-    });
     this.clearActiveStrokeMetadata();
     this.recordInputDiagnostic({
-      event: "stroke-finalized",
+      event: "slot-sealed",
       time: endedAt,
       pointerId: pointerId ?? undefined,
       pointerType,
+      durationMs: Math.max(0, endedAt - hotPathStartedAt),
       firstMoveMs:
         firstMoveAt === null
           ? undefined
           : firstMoveAt - this.strokeStartedAt,
       moveCount,
-      detail: `${reason};duration:${Math.max(0, endedAt - this.strokeStartedAt).toFixed(2)}ms`
+      detail: `slot:${slot.id};${reason};queue:${this.sealedStrokeSlots.length}`
     });
     this.options.onInteraction?.("stroke-end");
-    this.scheduleDocumentPublish(document, false, true);
+    this.scheduleInteractionFrame();
+    this.scheduleStrokeBatchFinalize();
+  }
+
+  private acquireInputSlot(
+    pointerId: number,
+    pointerType: string,
+    receivedAt: number
+  ): InkInputSlot {
+    let slot = this.inputSlots.find((candidate) => candidate.state === "free");
+    if (!slot) {
+      slot = {
+        commit: null,
+        id: this.inputSlots.length,
+        pointerId: null,
+        state: "free"
+      };
+      this.inputSlots.push(slot);
+      this.recordInputDiagnostic({
+        event: "slot-overflow",
+        time: performance.now(),
+        pointerId,
+        pointerType,
+        detail: `pool:${this.inputSlots.length}`
+      });
+    }
+    slot.state = "active";
+    slot.pointerId = pointerId;
+    slot.commit = null;
+    this.recordInputDiagnostic({
+      event: "slot-allocated",
+      time: performance.now(),
+      pointerId,
+      pointerType,
+      durationMs: Math.max(0, performance.now() - receivedAt),
+      detail: `slot:${slot.id};pool:${this.inputSlots.length};queue:${this.sealedStrokeSlots.length}`
+    });
+    return slot;
+  }
+
+  private inputSlotForActiveStroke(
+    pointerId: number | null,
+    pointerType: string,
+    receivedAt: number
+  ): InkInputSlot {
+    const slot =
+      this.activeStrokeSlotId === null
+        ? null
+        : this.inputSlots[this.activeStrokeSlotId] ?? null;
+    return slot ?? this.acquireInputSlot(pointerId ?? -1, pointerType, receivedAt);
+  }
+
+  private deferStrokeBatchFinalize(): void {
+    if (this.strokeFinalizeTimer === null) {
+      return;
+    }
+    window.clearTimeout(this.strokeFinalizeTimer);
+    this.strokeFinalizeTimer = null;
+  }
+
+  private scheduleStrokeBatchFinalize(): void {
+    this.deferStrokeBatchFinalize();
+    this.strokeFinalizeTimer = window.setTimeout(() => {
+      this.strokeFinalizeTimer = null;
+      if (this.activePointerKind === "draw") {
+        this.scheduleStrokeBatchFinalize();
+        return;
+      }
+      this.flushSealedStrokes();
+    }, InkCanvas.HANDWRITING_BURST_MS);
+  }
+
+  private flushSealedStrokes(): void {
+    this.deferStrokeBatchFinalize();
+    if (this.sealedStrokeSlots.length === 0) {
+      return;
+    }
+    const batchStartedAt = performance.now();
+    const documents = new Set<AnnotationDocument>();
+    while (this.sealedStrokeSlots.length > 0) {
+      const slotId = this.sealedStrokeSlots.shift();
+      if (slotId === undefined) {
+        break;
+      }
+      const slot = this.inputSlots[slotId];
+      const commit = slot?.commit;
+      if (!slot || !commit) {
+        continue;
+      }
+      slot.state = "processing";
+      if (!commit.visualCommitted && this.isFreehandStroke(commit.stroke)) {
+        this.drawStroke(commit.stroke, commit.viewport, commit.layerOpacity);
+      }
+      this.pushHistoryEntry({
+        kind: "stroke-add",
+        layerId: commit.layerId,
+        stroke: commit.stroke,
+        index: commit.strokeIndex
+      });
+      const finalizedAt = performance.now();
+      this.recordInputDiagnostic({
+        event: "slot-finalized",
+        time: finalizedAt,
+        pointerId: commit.pointerId ?? undefined,
+        pointerType: commit.pointerType,
+        durationMs: Math.max(0, finalizedAt - commit.sealedAt),
+        firstMoveMs:
+          commit.firstMoveAt === null
+            ? undefined
+            : commit.firstMoveAt - commit.startedAt,
+        moveCount: commit.moveCount,
+        detail: `slot:${slot.id};${commit.reason}`
+      });
+      this.recordInputDiagnostic({
+        event: "stroke-finalized",
+        time: finalizedAt,
+        pointerId: commit.pointerId ?? undefined,
+        pointerType: commit.pointerType,
+        firstMoveMs:
+          commit.firstMoveAt === null
+            ? undefined
+            : commit.firstMoveAt - commit.startedAt,
+        moveCount: commit.moveCount,
+        detail: `${commit.reason};duration:${Math.max(0, finalizedAt - commit.startedAt).toFixed(2)}ms`
+      });
+      documents.add(commit.document);
+      slot.commit = null;
+      slot.pointerId = null;
+      slot.state = "free";
+    }
+    this.drawLiveStroke();
+    for (const document of documents) {
+      this.scheduleDocumentPublish(document, false, true);
+    }
+    this.recordInputDiagnostic({
+      event: "slot-batch-finalized",
+      time: performance.now(),
+      durationMs: Math.max(0, performance.now() - batchStartedAt),
+      detail: `documents:${documents.size};pool:${this.inputSlots.length}`
+    });
   }
 
   private startPanInertia(velocityX: number, velocityY: number): void {
@@ -1518,6 +1732,9 @@ export class InkCanvas {
     }
 
     if (!this.activeStroke) {
+      if (this.sealedStrokeSlots.length > 0) {
+        this.drawLiveStroke();
+      }
       return;
     }
 
@@ -1615,8 +1832,19 @@ export class InkCanvas {
   }
 
   private drawLiveStroke(): void {
-    const stroke = this.activeStroke;
-    if (!stroke || !this.isFreehandStroke(stroke)) {
+    const pending = this.sealedStrokeSlots
+      .map((slotId) => this.inputSlots[slotId]?.commit ?? null)
+      .filter(
+        (commit): commit is PendingStrokeCommit =>
+          commit !== null &&
+          !commit.visualCommitted &&
+          this.isFreehandStroke(commit.stroke)
+      );
+    const activeStroke =
+      this.activeStroke && this.isFreehandStroke(this.activeStroke)
+        ? this.activeStroke
+        : null;
+    if (!activeStroke && pending.length === 0) {
       this.clearLiveCanvas();
       return;
     }
@@ -1627,15 +1855,35 @@ export class InkCanvas {
     const ratio = this.canvasPixelRatio(rect.width, rect.height);
     this.liveContext.setTransform(ratio, 0, 0, ratio, 0, 0);
     this.liveContext.clearRect(0, 0, rect.width, rect.height);
+    for (const commit of pending) {
+      this.drawStrokeOnLiveCanvas(
+        commit.stroke,
+        commit.viewport,
+        commit.layerOpacity
+      );
+    }
+    if (activeStroke) {
+      this.drawStrokeOnLiveCanvas(
+        activeStroke,
+        this.activeViewport ?? this.currentViewport(rect),
+        this.activeStrokeLayerOpacity
+      );
+    }
+  }
+
+  private drawStrokeOnLiveCanvas(
+    stroke: AnnotationStroke,
+    viewport: InkCanvasViewport,
+    layerOpacity: number
+  ): void {
     this.liveContext.save();
     this.liveContext.globalAlpha =
-      this.activeStrokeLayerOpacity *
-      (stroke.opacity ?? this.defaultOpacity(stroke.tool));
+      layerOpacity * (stroke.opacity ?? this.defaultOpacity(stroke.tool));
     this.liveContext.fillStyle = stroke.color;
     drawFreehandStroke(
       this.liveContext,
       stroke,
-      this.activeViewport ?? this.currentViewport(rect),
+      viewport,
       this.options.getPressureEnabled()
     );
     this.liveContext.restore();
