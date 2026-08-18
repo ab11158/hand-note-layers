@@ -85,7 +85,6 @@ export class InkCanvas {
   private activeStroke: AnnotationStroke | null = null;
   private activePointerId: number | null = null;
   private activePointerKind: "draw" | "pan" | null = null;
-  private activeSimpleContact = false;
   private activeTool: AnnotationTool | null = null;
   private eraserChanged = false;
   private undoStack: InkHistoryEntry[] = [];
@@ -164,13 +163,13 @@ export class InkCanvas {
     this.canvas.addEventListener("pointerdown", this.handlePointerDown);
     this.canvas.addEventListener("pointermove", this.handlePointerMove);
     this.canvas.addEventListener("pointerup", this.handlePointerUp);
-    this.canvas.addEventListener("pointercancel", this.handlePointerUp);
+    this.canvas.addEventListener("pointercancel", this.handlePointerCancel);
     this.canvas.addEventListener("lostpointercapture", this.handleLostPointerCapture);
     this.canvas.addEventListener("gotpointercapture", this.handlePointerCaptureChange);
     this.canvas.addEventListener("lostpointercapture", this.handlePointerCaptureChange);
     window.addEventListener("pointerdown", this.handleWindowPointerDownCapture, true);
     window.addEventListener("pointerup", this.handlePointerUp);
-    window.addEventListener("pointercancel", this.handlePointerUp);
+    window.addEventListener("pointercancel", this.handlePointerCancel);
     document.addEventListener("pointerdown", this.handleDocumentPointerDownCapture, true);
     this.updateInputMode();
     this.startPerformanceDiagnostics();
@@ -188,13 +187,13 @@ export class InkCanvas {
     this.canvas.removeEventListener("pointerdown", this.handlePointerDown);
     this.canvas.removeEventListener("pointermove", this.handlePointerMove);
     this.canvas.removeEventListener("pointerup", this.handlePointerUp);
-    this.canvas.removeEventListener("pointercancel", this.handlePointerUp);
+    this.canvas.removeEventListener("pointercancel", this.handlePointerCancel);
     this.canvas.removeEventListener("lostpointercapture", this.handleLostPointerCapture);
     this.canvas.removeEventListener("gotpointercapture", this.handlePointerCaptureChange);
     this.canvas.removeEventListener("lostpointercapture", this.handlePointerCaptureChange);
     window.removeEventListener("pointerdown", this.handleWindowPointerDownCapture, true);
     window.removeEventListener("pointerup", this.handlePointerUp);
-    window.removeEventListener("pointercancel", this.handlePointerUp);
+    window.removeEventListener("pointercancel", this.handlePointerCancel);
     document.removeEventListener("pointerdown", this.handleDocumentPointerDownCapture, true);
     this.diagnosticObserver?.disconnect();
     this.observer?.disconnect();
@@ -218,7 +217,6 @@ export class InkCanvas {
     this.activeStroke = null;
     this.activePointerId = null;
     this.activePointerKind = null;
-    this.activeSimpleContact = false;
     this.activeTool = null;
     this.activeFirstMoveAt = null;
     this.activeMoveCount = 0;
@@ -679,11 +677,11 @@ export class InkCanvas {
       return;
     }
 
+    this.deferPendingDocumentPublish();
     event.preventDefault();
     this.canvas.setPointerCapture(event.pointerId);
     this.activePointerId = event.pointerId;
     this.activePointerKind = "draw";
-    this.activeSimpleContact = event.pointerType === "pen";
     this.activeTool = tool;
     this.options.onActivate?.();
     this.activeRect = this.cachedRect ?? this.canvas.getBoundingClientRect();
@@ -706,6 +704,7 @@ export class InkCanvas {
       if (this.canvas.hasPointerCapture(event.pointerId)) {
         this.canvas.releasePointerCapture(event.pointerId);
       }
+      this.resumePendingDocumentPublish();
       return;
     }
 
@@ -717,6 +716,7 @@ export class InkCanvas {
         if (this.canvas.hasPointerCapture(event.pointerId)) {
           this.canvas.releasePointerCapture(event.pointerId);
         }
+        this.resumePendingDocumentPublish();
         return;
       }
       this.lassoPoints = [point];
@@ -754,7 +754,7 @@ export class InkCanvas {
       pointerId: event.pointerId,
       pointerType: event.pointerType,
       firstInkMs: firstInkAt - receivedAt,
-      detail: this.activeSimpleContact ? "simple-contact" : undefined
+      detail: event.pointerType === "pen" ? "native-pen" : undefined
     });
     this.schedulePresentationDiagnostics(event.pointerId, event.pointerType, firstInkAt);
   };
@@ -810,11 +810,7 @@ export class InkCanvas {
     }
 
     this.collectStrokePoints(event);
-    if (this.activeSimpleContact) {
-      this.flushInteractionFrame();
-    } else {
-      this.scheduleInteractionFrame();
-    }
+    this.scheduleInteractionFrame();
   };
 
   private handlePointerUp = (event: PointerEvent): void => {
@@ -862,7 +858,7 @@ export class InkCanvas {
     } else if (this.activeTool === "eraser") {
       if (this.eraserChanged) {
         this.options.onInteraction?.("erase");
-        this.options.onDocumentChange(this.options.getDocument(), false);
+        this.scheduleDocumentPublish(this.options.getDocument(), false);
       } else {
         this.undoStack.pop();
       }
@@ -876,17 +872,59 @@ export class InkCanvas {
     }
   };
 
+  private handlePointerCancel = (event: PointerEvent): void => {
+    if (event.pointerId !== this.activePointerId) {
+      return;
+    }
+
+    event.preventDefault();
+    this.recordInputDiagnostic({
+      event: "pointercancel-received",
+      time: performance.now(),
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      eventTimestamp: event.timeStamp,
+      arrivalLagMs: this.eventArrivalLag(event)
+    });
+
+    if (this.activePointerKind === "draw" && this.activeStroke) {
+      this.finalizeActiveStroke("pointercancel", event.pointerType);
+      return;
+    }
+
+    this.finishNonStrokeInteraction(true);
+  };
+
   private handleLostPointerCapture = (event: PointerEvent): void => {
     if (event.pointerId !== this.activePointerId) {
       return;
     }
-    this.handlePointerUp(event);
+    this.handlePointerCancel(event);
   };
+
+  private finishNonStrokeInteraction(commitEraser: boolean): void {
+    this.flushPendingInteraction();
+    if (this.activeTool === "select") {
+      this.cancelSelection();
+    } else if (this.activeTool === "eraser") {
+      if (commitEraser && this.eraserChanged) {
+        this.options.onInteraction?.("erase");
+        this.scheduleDocumentPublish(this.options.getDocument(), false);
+      } else if (!this.eraserChanged) {
+        this.undoStack.pop();
+      }
+      this.eraserChanged = false;
+    }
+    const pointerId = this.activePointerId;
+    this.resetPointerState();
+    if (pointerId !== null && this.canvas.hasPointerCapture(pointerId)) {
+      this.canvas.releasePointerCapture(pointerId);
+    }
+  }
 
   private resetPointerState(): void {
     this.activePointerId = null;
     this.activePointerKind = null;
-    this.activeSimpleContact = false;
     this.activeTool = null;
     this.activeRect = null;
     this.activeViewport = null;
@@ -1136,7 +1174,7 @@ export class InkCanvas {
     return {
       x: Math.max(0, Math.min(1, x)),
       y: Math.max(0, Math.min(1, y)),
-      pressure: this.activeSimpleContact ? 0.5 : event.pressure || 0.5
+      pressure: event.pressure || 0.5
     };
   }
 
@@ -1298,7 +1336,27 @@ export class InkCanvas {
         return;
       }
       this.flushDocumentPublish();
-    }, 64);
+    }, 300);
+  }
+
+  private deferPendingDocumentPublish(): void {
+    if (this.publishTimer === null) {
+      return;
+    }
+    window.clearTimeout(this.publishTimer);
+    this.publishTimer = null;
+  }
+
+  private resumePendingDocumentPublish(): void {
+    const pending = this.pendingPublish;
+    if (!pending || this.publishTimer !== null) {
+      return;
+    }
+    this.scheduleDocumentPublish(
+      pending.document,
+      pending.render,
+      pending.checkLayerOrder
+    );
   }
 
   private flushDocumentPublish(): void {
@@ -1551,7 +1609,7 @@ export class InkCanvas {
   }
 
   private coalescedEvents(event: PointerEvent): PointerEvent[] {
-    if (this.activeSimpleContact) {
+    if (event.pointerType === "pen" && this.isIosLike()) {
       return this.hasUsableCoordinates(event) ? [event] : [];
     }
     const samples = event.getCoalescedEvents?.();
@@ -1575,6 +1633,17 @@ export class InkCanvas {
       }
     }
     return usable;
+  }
+
+  private isIosLike(): boolean {
+    const navigatorValue = globalThis.navigator;
+    if (!navigatorValue) {
+      return false;
+    }
+    return (
+      /iPad|iPhone|iPod/.test(navigatorValue.userAgent) ||
+      (navigatorValue.platform === "MacIntel" && navigatorValue.maxTouchPoints > 1)
+    );
   }
 
   private hasUsableCoordinates(event: PointerEvent): boolean {
