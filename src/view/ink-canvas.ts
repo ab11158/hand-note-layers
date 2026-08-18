@@ -60,6 +60,8 @@ export interface InkInputDiagnostic {
   firstMoveMs?: number;
   frameMs?: number;
   durationMs?: number;
+  strokeDurationMs?: number;
+  pathLength?: number;
   moveCount?: number;
   pressure?: number;
   isPrimary?: boolean;
@@ -72,6 +74,7 @@ export interface InkInputDiagnostic {
   startSource?: InkSlotStartSource;
   target?: string;
   touchType?: string;
+  inputChannel?: "pointer" | "stylus-touch";
   detail?: string;
 }
 
@@ -123,10 +126,11 @@ export class InkCanvas {
   private static readonly MAX_CANVAS_PIXELS = 12_000_000;
   private static readonly MAX_CANVAS_DIMENSION = 16_384;
   private static readonly MAX_LASSO_POINTS = 192;
-  private static readonly MAX_INPUT_DIAGNOSTICS = 2400;
+  private static readonly MAX_INPUT_DIAGNOSTICS = 4800;
   private static readonly INPUT_SLOT_COUNT = 8;
   private static readonly HANDWRITING_BURST_MS = 150;
   private static readonly POST_UP_PROBE_MS = 350;
+  private static readonly PENCIL_COMPATIBILITY_GUARD_MS = 500;
 
   readonly canvas: HTMLCanvasElement;
   readonly liveCanvas: HTMLCanvasElement;
@@ -139,6 +143,7 @@ export class InkCanvas {
   private activeStroke: AnnotationStroke | null = null;
   private activePointerId: number | null = null;
   private activePointerKind: "draw" | "pan" | null = null;
+  private activeInputChannel: "pointer" | "stylus-touch" | null = null;
   private activeTool: AnnotationTool | null = null;
   private eraserChanged = false;
   private undoStack: InkHistoryEntry[] = [];
@@ -194,6 +199,7 @@ export class InkCanvas {
   private postUpProbePointerId: number | null = null;
   private postUpProbeTimer: number | null = null;
   private postUpProbeSequence = 0;
+  private lastStylusActivityAt = Number.NEGATIVE_INFINITY;
   private readonly inputDiagnostics = new Array<InkInputDiagnostic>(
     InkCanvas.MAX_INPUT_DIAGNOSTICS
   );
@@ -266,21 +272,25 @@ export class InkCanvas {
     window.addEventListener("pointercancel", this.handlePointerCancel);
     window.addEventListener("touchstart", this.handleWindowTouchCapture, {
       capture: true,
-      passive: true
+      passive: false
     });
     window.addEventListener("touchmove", this.handleWindowTouchCapture, {
       capture: true,
-      passive: true
+      passive: false
     });
     window.addEventListener("touchend", this.handleWindowTouchCapture, {
       capture: true,
-      passive: true
+      passive: false
     });
     window.addEventListener("touchcancel", this.handleWindowTouchCapture, {
       capture: true,
-      passive: true
+      passive: false
     });
     window.addEventListener("mousedown", this.handleWindowMouseDownCapture, true);
+    window.addEventListener("mouseup", this.handleCompatibilityMouseCapture, true);
+    window.addEventListener("click", this.handleCompatibilityMouseCapture, true);
+    window.addEventListener("dblclick", this.handleCompatibilityMouseCapture, true);
+    window.addEventListener("contextmenu", this.handleCompatibilityMouseCapture, true);
     document.addEventListener("pointerdown", this.handleDocumentPointerDownCapture, true);
     this.updateInputMode();
     this.startPerformanceDiagnostics();
@@ -316,6 +326,10 @@ export class InkCanvas {
     window.removeEventListener("touchend", this.handleWindowTouchCapture, true);
     window.removeEventListener("touchcancel", this.handleWindowTouchCapture, true);
     window.removeEventListener("mousedown", this.handleWindowMouseDownCapture, true);
+    window.removeEventListener("mouseup", this.handleCompatibilityMouseCapture, true);
+    window.removeEventListener("click", this.handleCompatibilityMouseCapture, true);
+    window.removeEventListener("dblclick", this.handleCompatibilityMouseCapture, true);
+    window.removeEventListener("contextmenu", this.handleCompatibilityMouseCapture, true);
     document.removeEventListener("pointerdown", this.handleDocumentPointerDownCapture, true);
     this.diagnosticObserver?.disconnect();
     this.observer?.disconnect();
@@ -343,6 +357,7 @@ export class InkCanvas {
     this.activeStroke = null;
     this.activePointerId = null;
     this.activePointerKind = null;
+    this.activeInputChannel = null;
     this.activeTool = null;
     this.activeFirstMoveAt = null;
     this.activeMoveCount = 0;
@@ -776,12 +791,27 @@ export class InkCanvas {
   }
 
   private handlePointerDown = (event: PointerEvent): void => {
-    this.startPointerSession(event, "real-pointerdown");
+    if (event.pointerType === "pen") {
+      this.claimPencilEvent(event);
+      if (this.activeInputChannel === "stylus-touch") {
+        this.recordInputDiagnostic({
+          event: "pointerdown-deduplicated",
+          time: performance.now(),
+          pointerId: event.pointerId,
+          pointerType: event.pointerType,
+          inputChannel: "stylus-touch",
+          detail: "stylus-touch-session-already-active"
+        });
+        return;
+      }
+    }
+    this.startPointerSession(event, "real-pointerdown", "pointer");
   };
 
   private startPointerSession(
     event: PointerEvent,
-    startSource: InkSlotStartSource
+    startSource: InkSlotStartSource,
+    inputChannel: "pointer" | "stylus-touch" = "pointer"
   ): void {
     const receivedAt = performance.now();
     this.recordInputDiagnostic({
@@ -797,6 +827,7 @@ export class InkCanvas {
       pointerType: event.pointerType,
       pressure: event.pressure,
       startSource,
+      inputChannel,
       eventTimestamp: event.timeStamp,
       arrivalLagMs: this.eventArrivalLag(event, receivedAt),
       interStrokeMs:
@@ -838,6 +869,7 @@ export class InkCanvas {
       this.canvas.setPointerCapture(event.pointerId);
       this.activePointerId = event.pointerId;
       this.activePointerKind = "pan";
+      this.activeInputChannel = "pointer";
       this.panLastX = event.clientX;
       this.panLastY = event.clientY;
       this.panLastTime = event.timeStamp || performance.now();
@@ -861,10 +893,10 @@ export class InkCanvas {
 
     this.deferPendingDocumentPublish();
     const hotPathStartedAt = performance.now();
-    event.preventDefault();
-    this.tryCapturePointer(event.pointerId);
+    this.claimPencilEvent(event);
     this.activePointerId = event.pointerId;
     this.activePointerKind = "draw";
+    this.activeInputChannel = inputChannel;
     this.activeTool = tool;
     this.options.onActivate?.();
     this.activeRect = this.cachedRect ?? this.canvas.getBoundingClientRect();
@@ -951,6 +983,7 @@ export class InkCanvas {
       firstInkMs: firstInkAt - receivedAt,
       slotId: inputSlot.id,
       startSource,
+      inputChannel,
       detail: startSource
     });
     this.schedulePresentationDiagnostics(event.pointerId, event.pointerType, firstInkAt);
@@ -971,12 +1004,16 @@ export class InkCanvas {
           startSource: "orphan-pointermove",
           target: this.describeEventTarget(event.target)
         });
-        this.startPointerSession(event, "orphan-pointermove");
+        this.startPointerSession(event, "orphan-pointermove", "pointer");
       }
       return;
     }
 
-    event.preventDefault();
+    if (event.pointerType === "pen") {
+      this.claimPencilEvent(event);
+    } else {
+      event.preventDefault();
+    }
     if (this.activePointerKind === "draw") {
       this.activeMoveCount += 1;
       if (this.activeFirstMoveAt === null) {
@@ -986,6 +1023,7 @@ export class InkCanvas {
           time: this.activeFirstMoveAt,
           pointerId: event.pointerId,
           pointerType: event.pointerType,
+          inputChannel: this.activeInputChannel ?? undefined,
           eventTimestamp: event.timeStamp,
           arrivalLagMs: this.eventArrivalLag(event, this.activeFirstMoveAt),
           firstMoveMs: this.activeFirstMoveAt - this.strokeStartedAt,
@@ -1032,12 +1070,17 @@ export class InkCanvas {
     }
 
     const hotPathStartedAt = performance.now();
-    event.preventDefault();
+    if (event.pointerType === "pen") {
+      this.claimPencilEvent(event);
+    } else {
+      event.preventDefault();
+    }
     this.recordInputDiagnostic({
       event: "pointerup-received",
       time: hotPathStartedAt,
       pointerId: event.pointerId,
       pointerType: event.pointerType,
+      inputChannel: this.activeInputChannel ?? undefined,
       eventTimestamp: event.timeStamp,
       arrivalLagMs: this.eventArrivalLag(event)
     });
@@ -1095,12 +1138,17 @@ export class InkCanvas {
     }
 
     const hotPathStartedAt = performance.now();
-    event.preventDefault();
+    if (event.pointerType === "pen") {
+      this.claimPencilEvent(event);
+    } else {
+      event.preventDefault();
+    }
     this.recordInputDiagnostic({
       event: "pointercancel-received",
       time: hotPathStartedAt,
       pointerId: event.pointerId,
       pointerType: event.pointerType,
+      inputChannel: this.activeInputChannel ?? undefined,
       eventTimestamp: event.timeStamp,
       arrivalLagMs: this.eventArrivalLag(event)
     });
@@ -1115,6 +1163,17 @@ export class InkCanvas {
 
   private handleLostPointerCapture = (event: PointerEvent): void => {
     if (event.pointerId !== this.activePointerId) {
+      return;
+    }
+    if (event.pointerType === "pen" && this.activeInputChannel === "pointer") {
+      this.recordInputDiagnostic({
+        event: "pencil-capture-loss-ignored",
+        time: performance.now(),
+        pointerId: event.pointerId,
+        pointerType: event.pointerType,
+        inputChannel: "pointer",
+        detail: "window-capture-owns-session"
+      });
       return;
     }
     this.handlePointerCancel(event);
@@ -1143,6 +1202,7 @@ export class InkCanvas {
   private resetPointerState(): void {
     this.activePointerId = null;
     this.activePointerKind = null;
+    this.activeInputChannel = null;
     this.activeTool = null;
     this.activeRect = null;
     this.activeViewport = null;
@@ -1169,6 +1229,8 @@ export class InkCanvas {
     const pointerId = this.activePointerId;
     const firstMoveAt = this.activeFirstMoveAt;
     const moveCount = this.activeMoveCount;
+    const strokeDurationMs = Math.max(0, performance.now() - this.strokeStartedAt);
+    const pathLength = this.activeStrokePathLength;
     const viewport =
       this.activeViewport ??
       this.currentViewport(this.activeRect ?? this.canvas.getBoundingClientRect());
@@ -1209,6 +1271,8 @@ export class InkCanvas {
       pointerId: pointerId ?? undefined,
       pointerType,
       durationMs: Math.max(0, endedAt - hotPathStartedAt),
+      strokeDurationMs,
+      pathLength,
       firstMoveMs:
         firstMoveAt === null
           ? undefined
@@ -1613,19 +1677,67 @@ export class InkCanvas {
 
   private handleWindowPointerDownCapture = (event: PointerEvent): void => {
     this.recordPointerPhase("window-capture", event);
-    if (event.pointerType === "pen") {
-      this.resolvePostUpProbe("pointerdown", event);
+    if (event.pointerType !== "pen" || !this.shouldOwnPencilPoint(event)) {
+      return;
     }
+    this.lastStylusActivityAt = performance.now();
+    this.claimPencilEvent(event);
+    this.resolvePostUpProbe("pointerdown", event);
+    if (this.activeInputChannel === "stylus-touch") {
+      this.recordInputDiagnostic({
+        event: "pointerdown-deduplicated",
+        time: performance.now(),
+        pointerId: event.pointerId,
+        pointerType: event.pointerType,
+        inputChannel: "stylus-touch",
+        target: this.describeEventTarget(event.target),
+        detail: "window-capture-after-touch-fallback"
+      });
+      return;
+    }
+    this.recordInputDiagnostic({
+      event: "pencil-exclusive-pointerdown",
+      time: performance.now(),
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      inputChannel: "pointer",
+      target: this.describeEventTarget(event.target)
+    });
+    this.startPointerSession(event, "real-pointerdown", "pointer");
   };
 
   private handleWindowPointerMoveCapture = (event: PointerEvent): void => {
+    if (event.pointerType !== "pen") {
+      return;
+    }
     if (this.shouldRecordPostUpPointerSignal(event)) {
       this.recordPointerPhase("window-pointermove-probe", event);
       if ((event.buttons & 1) === 1 || event.pressure > 0.01) {
         this.resolvePostUpProbe("pointermove-contact", event);
       }
     }
+    if (
+      this.activeInputChannel === "stylus-touch" &&
+      this.activePointerKind === "draw"
+    ) {
+      if (this.shouldOwnPencilPoint(event)) {
+        this.lastStylusActivityAt = performance.now();
+        this.claimPencilEvent(event);
+      }
+      return;
+    }
+    if (
+      this.activeInputChannel === "pointer" &&
+      event.pointerId === this.activePointerId
+    ) {
+      this.lastStylusActivityAt = performance.now();
+      this.claimPencilEvent(event);
+      this.handlePointerMove(event);
+      return;
+    }
     if (this.shouldRescueOrphanPenMove(event)) {
+      this.lastStylusActivityAt = performance.now();
+      this.claimPencilEvent(event);
       this.handlePointerMove(event);
     }
   };
@@ -1649,10 +1761,26 @@ export class InkCanvas {
   };
 
   private handleWindowPointerEndCapture = (event: PointerEvent): void => {
-    if (event.pointerType !== "pen" || !this.eventTouchesCanvas(event)) {
+    if (event.pointerType !== "pen") {
       return;
     }
+    const ownsActivePointer =
+      this.activeInputChannel === "pointer" &&
+      event.pointerId === this.activePointerId;
+    if (!ownsActivePointer && !this.shouldOwnPencilPoint(event)) {
+      return;
+    }
+    this.lastStylusActivityAt = performance.now();
+    this.claimPencilEvent(event);
     this.recordPointerPhase(`window-${event.type}-capture`, event);
+    if (!ownsActivePointer) {
+      return;
+    }
+    if (event.type === "pointercancel") {
+      this.handlePointerCancel(event);
+    } else {
+      this.handlePointerUp(event);
+    }
   };
 
   private handleWindowTouchCapture = (event: TouchEvent): void => {
@@ -1675,6 +1803,8 @@ export class InkCanvas {
         continue;
       }
       const receivedAt = performance.now();
+      this.lastStylusActivityAt = receivedAt;
+      this.claimPencilEvent(event);
       const sinceLastPenUpMs = this.sincePostUpProbeStarted(receivedAt);
       this.recordInputDiagnostic({
         event: "stylus-touch-observed",
@@ -1687,21 +1817,59 @@ export class InkCanvas {
         pressure: stylusTouch.force,
         sinceLastPenUpMs,
         startSource: this.stylusTouchSource(event.type),
+        inputChannel: "stylus-touch",
         target: this.describeEventTarget(event.target),
         touchType,
         detail: event.type
       });
       if (event.type === "touchstart") {
         this.resolvePostUpProbe("stylus-touchstart", event, touch.identifier);
+        if (this.activeInputChannel === "pointer") {
+          this.recordInputDiagnostic({
+            event: "stylus-touch-deduplicated",
+            time: receivedAt,
+            pointerId: touch.identifier,
+            pointerType: "touch",
+            inputChannel: "pointer",
+            detail: "pointer-session-already-active"
+          });
+          continue;
+        }
+        this.startPointerSession(
+          this.pointerEventFromStylusTouch(event, touch),
+          "stylus-touchstart",
+          "stylus-touch"
+        );
+        continue;
+      }
+      if (
+        this.activeInputChannel !== "stylus-touch" ||
+        touch.identifier !== this.activePointerId
+      ) {
+        continue;
+      }
+      const pointerEvent = this.pointerEventFromStylusTouch(event, touch);
+      if (event.type === "touchmove") {
+        this.handlePointerMove(pointerEvent);
+      } else if (event.type === "touchcancel") {
+        this.handlePointerCancel(pointerEvent);
+      } else if (event.type === "touchend") {
+        this.handlePointerUp(pointerEvent);
       }
     }
   };
 
   private handleWindowMouseDownCapture = (event: MouseEvent): void => {
-    if (this.postUpProbeStartedAt === null || !this.eventTouchesCanvas(event)) {
+    if (!this.eventTouchesCanvas(event)) {
       return;
     }
     const receivedAt = performance.now();
+    if (this.isInPencilCompatibilityGuard(receivedAt)) {
+      this.suppressCompatibilityEvent(event, receivedAt);
+    }
+    if (this.postUpProbeStartedAt === null) {
+      return;
+    }
     this.recordInputDiagnostic({
       event: "window-mousedown-probe",
       time: receivedAt,
@@ -1717,6 +1885,17 @@ export class InkCanvas {
     this.resolvePostUpProbe("compat-mousedown", event);
   };
 
+  private handleCompatibilityMouseCapture = (event: MouseEvent): void => {
+    const receivedAt = performance.now();
+    if (
+      !this.isInPencilCompatibilityGuard(receivedAt) ||
+      !this.eventTouchesCanvas(event)
+    ) {
+      return;
+    }
+    this.suppressCompatibilityEvent(event, receivedAt);
+  };
+
   private handleDocumentPointerDownCapture = (event: PointerEvent): void => {
     this.recordPointerPhase("document-capture", event);
   };
@@ -1725,22 +1904,9 @@ export class InkCanvas {
     return (
       this.activePointerId === null &&
       event.pointerType === "pen" &&
-      event.target === this.canvas &&
+      this.shouldOwnPencilPoint(event) &&
       ((event.buttons & 1) === 1 || event.pressure > 0.01)
     );
-  }
-
-  private tryCapturePointer(pointerId: number): void {
-    try {
-      this.canvas.setPointerCapture(pointerId);
-    } catch {
-      this.recordInputDiagnostic({
-        event: "pointer-capture-unavailable",
-        time: performance.now(),
-        pointerId,
-        pointerType: "pen"
-      });
-    }
   }
 
   private handleCanvasPointerDownCapture = (event: PointerEvent): void => {
@@ -1760,6 +1926,21 @@ export class InkCanvas {
       arrivalLagMs: this.eventArrivalLag(event),
       target: this.describeEventTarget(event.target)
     });
+    if (
+      event.type === "gotpointercapture" &&
+      this.activeInputChannel === "pointer" &&
+      this.canvas.hasPointerCapture(event.pointerId)
+    ) {
+      this.canvas.releasePointerCapture(event.pointerId);
+      this.recordInputDiagnostic({
+        event: "pencil-capture-released",
+        time: performance.now(),
+        pointerId: event.pointerId,
+        pointerType: event.pointerType,
+        inputChannel: "pointer",
+        detail: "pencil-exclusive-window-routing"
+      });
+    }
   };
 
   private recordPointerPhase(phase: string, event: PointerEvent): void {
@@ -1881,29 +2062,112 @@ export class InkCanvas {
   }
 
   private eventTouchesCanvas(event: MouseEvent | PointerEvent): boolean {
-    if (event.target === this.canvas || this.canvas.contains(event.target as Node | null)) {
-      return true;
-    }
-    const rect = this.cachedRect ?? this.canvas.getBoundingClientRect();
-    return (
-      event.clientX >= rect.left &&
-      event.clientX <= rect.right &&
-      event.clientY >= rect.top &&
-      event.clientY <= rect.bottom
-    );
+    return this.shouldOwnContactPoint(event.clientX, event.clientY, event.target);
   }
 
   private touchTouchesCanvas(touch: Touch, target: EventTarget | null): boolean {
+    return this.shouldOwnContactPoint(touch.clientX, touch.clientY, target);
+  }
+
+  private shouldOwnPencilPoint(event: PointerEvent): boolean {
+    return this.shouldOwnContactPoint(event.clientX, event.clientY, event.target);
+  }
+
+  private shouldOwnContactPoint(
+    clientX: number,
+    clientY: number,
+    target: EventTarget | null
+  ): boolean {
     if (target === this.canvas || this.canvas.contains(target as Node | null)) {
       return true;
     }
-    const rect = this.cachedRect ?? this.canvas.getBoundingClientRect();
+    if (
+      target instanceof Element &&
+      target.closest(".hand-note-canvas") !== null
+    ) {
+      return false;
+    }
+    const rect = this.canvas.getBoundingClientRect();
     return (
-      touch.clientX >= rect.left &&
-      touch.clientX <= rect.right &&
-      touch.clientY >= rect.top &&
-      touch.clientY <= rect.bottom
+      clientX >= rect.left &&
+      clientX <= rect.right &&
+      clientY >= rect.top &&
+      clientY <= rect.bottom
     );
+  }
+
+  private claimPencilEvent(event: Event): void {
+    if (event.cancelable) {
+      event.preventDefault();
+    }
+    event.stopPropagation();
+  }
+
+  private pointerEventFromStylusTouch(
+    event: TouchEvent,
+    touch: Touch
+  ): PointerEvent {
+    const stylusTouch = touch as Touch & { force?: number };
+    const ended = event.type === "touchend" || event.type === "touchcancel";
+    const pointerType =
+      event.type === "touchstart"
+        ? "pointerdown"
+        : event.type === "touchmove"
+          ? "pointermove"
+          : event.type === "touchcancel"
+            ? "pointercancel"
+            : "pointerup";
+    return {
+      type: pointerType,
+      pointerId: touch.identifier,
+      pointerType: "pen",
+      clientX: touch.clientX,
+      clientY: touch.clientY,
+      pressure: ended ? 0 : Math.max(0.01, stylusTouch.force ?? 0.5),
+      buttons: ended ? 0 : 1,
+      isPrimary: true,
+      tiltX: 0,
+      tiltY: 0,
+      width: Math.max(0.5, (touch.radiusX || 0.25) * 2),
+      height: Math.max(0.5, (touch.radiusY || 0.25) * 2),
+      timeStamp: event.timeStamp,
+      target: event.target,
+      cancelable: event.cancelable,
+      preventDefault: () => {
+        if (event.cancelable) {
+          event.preventDefault();
+        }
+      },
+      stopPropagation: () => event.stopPropagation(),
+      getCoalescedEvents: () => []
+    } as unknown as PointerEvent;
+  }
+
+  private isInPencilCompatibilityGuard(receivedAt = performance.now()): boolean {
+    return (
+      receivedAt - this.lastStylusActivityAt <=
+      InkCanvas.PENCIL_COMPATIBILITY_GUARD_MS
+    );
+  }
+
+  private suppressCompatibilityEvent(event: MouseEvent, receivedAt: number): void {
+    if (event.cancelable) {
+      event.preventDefault();
+    }
+    event.stopPropagation();
+    this.recordInputDiagnostic({
+      event: "pencil-compatibility-event-suppressed",
+      time: receivedAt,
+      buttons: event.buttons,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      pointerType: "mouse-compat",
+      eventTimestamp: event.timeStamp,
+      arrivalLagMs: this.eventArrivalLag(event, receivedAt),
+      sinceLastPenUpMs: this.sincePostUpProbeStarted(receivedAt),
+      target: this.describeEventTarget(event.target),
+      detail: event.type
+    });
   }
 
   private stylusTouchSource(eventType: string): InkSlotStartSource {
