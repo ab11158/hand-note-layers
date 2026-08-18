@@ -93,6 +93,8 @@ export class InkCanvas {
   private interactionFrame: number | null = null;
   private resizeFrame: number | null = null;
   private readonly diagnosticFrames = new Set<number>();
+  private readonly windowRoutedPenDownEvents = new WeakSet<PointerEvent>();
+  private readonly windowRoutedPenMoveEvents = new WeakSet<PointerEvent>();
   private diagnosticObserver: PerformanceObserver | null = null;
   private activeRect: DOMRect | null = null;
   private cachedRect: DOMRect | null = null;
@@ -168,8 +170,10 @@ export class InkCanvas {
     this.canvas.addEventListener("gotpointercapture", this.handlePointerCaptureChange);
     this.canvas.addEventListener("lostpointercapture", this.handlePointerCaptureChange);
     window.addEventListener("pointerdown", this.handleWindowPointerDownCapture, true);
-    window.addEventListener("pointerup", this.handlePointerUp);
-    window.addEventListener("pointercancel", this.handlePointerCancel);
+    window.addEventListener("pointermove", this.handleWindowPointerMoveCapture, true);
+    window.addEventListener("pointerrawupdate", this.handleWindowPointerMoveCapture, true);
+    window.addEventListener("pointerup", this.handlePointerUp, true);
+    window.addEventListener("pointercancel", this.handlePointerCancel, true);
     document.addEventListener("pointerdown", this.handleDocumentPointerDownCapture, true);
     this.updateInputMode();
     this.startPerformanceDiagnostics();
@@ -192,8 +196,10 @@ export class InkCanvas {
     this.canvas.removeEventListener("gotpointercapture", this.handlePointerCaptureChange);
     this.canvas.removeEventListener("lostpointercapture", this.handlePointerCaptureChange);
     window.removeEventListener("pointerdown", this.handleWindowPointerDownCapture, true);
-    window.removeEventListener("pointerup", this.handlePointerUp);
-    window.removeEventListener("pointercancel", this.handlePointerCancel);
+    window.removeEventListener("pointermove", this.handleWindowPointerMoveCapture, true);
+    window.removeEventListener("pointerrawupdate", this.handleWindowPointerMoveCapture, true);
+    window.removeEventListener("pointerup", this.handlePointerUp, true);
+    window.removeEventListener("pointercancel", this.handlePointerCancel, true);
     document.removeEventListener("pointerdown", this.handleDocumentPointerDownCapture, true);
     this.diagnosticObserver?.disconnect();
     this.observer?.disconnect();
@@ -612,6 +618,9 @@ export class InkCanvas {
   }
 
   private handlePointerDown = (event: PointerEvent): void => {
+    if (this.windowRoutedPenDownEvents.has(event)) {
+      return;
+    }
     const receivedAt = performance.now();
     this.recordInputDiagnostic({
       event: "pointerdown-received",
@@ -679,7 +688,9 @@ export class InkCanvas {
 
     this.deferPendingDocumentPublish();
     event.preventDefault();
-    this.canvas.setPointerCapture(event.pointerId);
+    if (event.pointerType !== "pen") {
+      this.canvas.setPointerCapture(event.pointerId);
+    }
     this.activePointerId = event.pointerId;
     this.activePointerKind = "draw";
     this.activeTool = tool;
@@ -760,11 +771,17 @@ export class InkCanvas {
   };
 
   private handlePointerMove = (event: PointerEvent): void => {
+    if (this.windowRoutedPenMoveEvents.has(event)) {
+      return;
+    }
     if (event.pointerId !== this.activePointerId) {
       return;
     }
 
     event.preventDefault();
+    if (event.pointerType === "pen") {
+      event.stopPropagation();
+    }
     if (this.activePointerKind === "draw") {
       this.activeMoveCount += 1;
       if (this.activeFirstMoveAt === null) {
@@ -776,7 +793,8 @@ export class InkCanvas {
           pointerType: event.pointerType,
           eventTimestamp: event.timeStamp,
           arrivalLagMs: this.eventArrivalLag(event, this.activeFirstMoveAt),
-          firstMoveMs: this.activeFirstMoveAt - this.strokeStartedAt
+          firstMoveMs: this.activeFirstMoveAt - this.strokeStartedAt,
+          detail: event.type
         });
       }
     }
@@ -819,6 +837,9 @@ export class InkCanvas {
     }
 
     event.preventDefault();
+    if (event.pointerType === "pen") {
+      event.stopPropagation();
+    }
     this.recordInputDiagnostic({
       event: "pointerup-received",
       time: performance.now(),
@@ -878,6 +899,9 @@ export class InkCanvas {
     }
 
     event.preventDefault();
+    if (event.pointerType === "pen") {
+      event.stopPropagation();
+    }
     this.recordInputDiagnostic({
       event: "pointercancel-received",
       time: performance.now(),
@@ -1190,6 +1214,31 @@ export class InkCanvas {
 
   private handleWindowPointerDownCapture = (event: PointerEvent): void => {
     this.recordPointerPhase("window-capture", event);
+    if (event.pointerType !== "pen" || event.target !== this.canvas) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    this.recordInputDiagnostic({
+      event: "pen-window-route-down",
+      time: performance.now(),
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      eventTimestamp: event.timeStamp,
+      arrivalLagMs: this.eventArrivalLag(event),
+      target: this.describeEventTarget(event.target),
+      detail: "no-pointer-capture"
+    });
+    this.handlePointerDown(event);
+    this.windowRoutedPenDownEvents.add(event);
+  };
+
+  private handleWindowPointerMoveCapture = (event: PointerEvent): void => {
+    if (event.pointerType !== "pen" || event.pointerId !== this.activePointerId) {
+      return;
+    }
+    this.handlePointerMove(event);
+    this.windowRoutedPenMoveEvents.add(event);
   };
 
   private handleDocumentPointerDownCapture = (event: PointerEvent): void => {
