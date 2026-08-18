@@ -10,6 +10,7 @@ import {
   AnnotationTool,
   EraserMode,
   SelectionMode,
+  ShapeKind,
   createLayer,
   getActiveLayer,
   nextLayerName
@@ -54,12 +55,15 @@ export class MarkdownAnnotationView extends ItemView {
     pencil: 3,
     highlighter: 18,
     eraser: 28,
-    select: 4
+    select: 4,
+    text: 24,
+    shape: 4
   };
   private pressureEnabled = true;
   private pencilShortcutEnabled = true;
   private eraserMode: EraserMode = "partial";
   private selectionMode: SelectionMode = "free";
+  private shapeKind: ShapeKind = "rectangle";
 
   constructor(leaf: WorkspaceLeaf) {
     super(leaf);
@@ -156,6 +160,7 @@ export class MarkdownAnnotationView extends ItemView {
       getEraserSize: () => this.toolSizes.eraser,
       getEraserMode: () => this.eraserMode,
       getSelectionMode: () => this.selectionMode,
+      getShapeKind: () => this.shapeKind,
       getPressureEnabled: () => this.pressureEnabled,
       onDocumentChange: (next, renderCanvas) =>
         this.handleDocumentChange(next, renderCanvas, false),
@@ -178,7 +183,8 @@ export class MarkdownAnnotationView extends ItemView {
       this.inkCanvas.liveCanvas,
       this.inkCanvas.selectionOutline,
       this.inkCanvas.selectionTransform,
-      this.inkCanvas.selectionMenu
+      this.inkCanvas.selectionMenu,
+      this.inkCanvas.shapeControls
     );
     if (typeof ResizeObserver !== "undefined") {
       this.surfaceObserver = new ResizeObserver(() =>
@@ -231,6 +237,7 @@ export class MarkdownAnnotationView extends ItemView {
       initialPencilShortcutEnabled: this.pencilShortcutEnabled,
       initialEraserMode: this.eraserMode,
       initialSelectionMode: this.selectionMode,
+      initialShapeKind: this.shapeKind,
       getSize: (tool) => this.toolSizes[tool],
       onToolChange: (tool) => this.setTool(tool),
       onColorChange: (color) => this.setColor(color),
@@ -250,6 +257,9 @@ export class MarkdownAnnotationView extends ItemView {
       },
       onSelectionModeChange: (mode) => {
         this.selectionMode = mode;
+      },
+      onShapeKindChange: (kind) => {
+        this.shapeKind = kind;
       },
       onWhiteboard: () => this.toggleWhiteboard(),
       onUndo: () => this.currentInkCanvas()?.undo(),
@@ -416,6 +426,9 @@ export class MarkdownAnnotationView extends ItemView {
       return;
     }
     layer.visible = true;
+    if (layer.opacity <= 0) {
+      layer.opacity = layer.lastNonZeroOpacity ?? 1;
+    }
     this.document.activeLayerId = layerId;
     this.handleDocumentChange(this.document);
   }
@@ -454,7 +467,10 @@ export class MarkdownAnnotationView extends ItemView {
     if (!layer) {
       return;
     }
-    layer.opacity = opacity;
+    layer.opacity = Math.max(0, Math.min(1, opacity));
+    if (layer.opacity > 0) {
+      layer.lastNonZeroOpacity = layer.opacity;
+    }
     this.handleDocumentChange(this.document as AnnotationDocument, true, false);
   }
 
@@ -522,6 +538,7 @@ export class MarkdownAnnotationView extends ItemView {
       getSize: () => this.toolSizes[this.currentTool],
       getEraserSize: () => this.toolSizes.eraser,
       getEraserMode: () => this.eraserMode,
+      getShapeKind: () => this.shapeKind,
       getPressureEnabled: () => this.pressureEnabled,
       onActivate: () => {
         this.activeInkTarget = "whiteboard";
@@ -574,6 +591,7 @@ export class MarkdownAnnotationView extends ItemView {
       getSize: () => this.toolSizes[this.currentTool],
       getEraserSize: () => this.toolSizes.eraser,
       getEraserMode: () => this.eraserMode,
+      getShapeKind: () => this.shapeKind,
       getPressureEnabled: () => this.pressureEnabled,
       onActivate: () => {
         this.activeInkTarget = "whiteboard";
@@ -604,6 +622,7 @@ export class MarkdownAnnotationView extends ItemView {
     replacement.id = previous.id;
     replacement.name = previous.name;
     replacement.opacity = previous.opacity;
+    replacement.lastNonZeroOpacity = previous.lastNonZeroOpacity;
     replacement.visible = !hide;
     this.document.layers[index] = replacement;
     this.document.draftWhiteboards = (this.document.draftWhiteboards ?? []).filter(
@@ -672,6 +691,7 @@ export class MarkdownAnnotationView extends ItemView {
       layer.id = existing.id;
       layer.name = existing.name;
       layer.opacity = existing.opacity;
+      layer.lastNonZeroOpacity = existing.lastNonZeroOpacity;
       layer.visible = true;
       this.document.layers[existingIndex] = layer;
     } else {

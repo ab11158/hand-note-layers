@@ -35,9 +35,9 @@ export class SelectionOverlay {
     this.menu = document.createElement("div");
     this.menu.className = "hand-note-selection-menu";
 
-    const duplicateButton = this.createButton("copy", "复制选中笔迹");
+    const duplicateButton = this.createButton("copy", "复制选中内容");
     duplicateButton.addEventListener("click", onDuplicate);
-    const deleteButton = this.createButton("trash-2", "删除选中笔迹");
+    const deleteButton = this.createButton("trash-2", "删除选中内容");
     deleteButton.addEventListener("click", onDelete);
     const cancelButton = this.createButton("x", "取消选择");
     cancelButton.addEventListener("click", onCancel);

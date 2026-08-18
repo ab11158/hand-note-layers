@@ -17,6 +17,12 @@ export interface PdfExportResult {
   excludedDraftWhiteboards: number;
 }
 
+export interface LayerPackageExportResult {
+  path: string;
+  layerCount: number;
+  excludedDraftWhiteboards: number;
+}
+
 interface ExportedFileEntry {
   sourcePath: string;
   sourceCopy: string;
@@ -52,6 +58,54 @@ function strokeSvg(
         .map((point) => `${(point.x * 1000).toFixed(2)},${(point.y * 1000).toFixed(2)}`)
         .join(" ");
       const color = xmlEscape(stroke.color);
+      if (stroke.tool === "text") {
+        const start = stroke.points[0];
+        const fontSize = stroke.fontSize ?? stroke.size ?? 24;
+        const lines = (stroke.text ?? "文本").split("\n");
+        return `<text x="${(start.x * 1000).toFixed(2)}" y="${(
+          start.y * 1000
+        ).toFixed(2)}" fill="${color}" font-family="sans-serif" font-size="${fontSize}" dominant-baseline="hanging" opacity="${opacity}">${lines
+          .map(
+            (text, index) =>
+              `<tspan x="${(start.x * 1000).toFixed(2)}" dy="${
+                index === 0 ? 0 : fontSize * 1.25
+              }">${xmlEscape(text)}</tspan>`
+          )
+          .join("")}</text>`;
+      }
+      if (stroke.tool === "shape") {
+        const pixels = stroke.points.map((point) => ({
+          x: point.x * 1000,
+          y: point.y * 1000
+        }));
+        if (stroke.shape === "curve" && pixels.length >= 4) {
+          return `<path d="M${pixels[0].x},${pixels[0].y} C${pixels[1].x},${pixels[1].y} ${pixels[2].x},${pixels[2].y} ${pixels[3].x},${pixels[3].y}" fill="none" stroke="${color}" stroke-width="${stroke.size}" stroke-linecap="round" opacity="${opacity}"/>`;
+        }
+        if (stroke.shape === "ellipse" && pixels.length >= 4) {
+          const commands: string[] = [`M${pixels[0].x},${pixels[0].y}`];
+          for (let index = 0; index < 4; index += 1) {
+            const previous = pixels[(index + 3) % 4];
+            const current = pixels[index];
+            const next = pixels[(index + 1) % 4];
+            const after = pixels[(index + 2) % 4];
+            commands.push(
+              `C${current.x + (next.x - previous.x) / 6},${
+                current.y + (next.y - previous.y) / 6
+              } ${next.x - (after.x - current.x) / 6},${
+                next.y - (after.y - current.y) / 6
+              } ${next.x},${next.y}`
+            );
+          }
+          commands.push("Z");
+          return `<path d="${commands.join(" ")}" fill="none" stroke="${color}" stroke-width="${stroke.size}" stroke-linejoin="round" opacity="${opacity}"/>`;
+        }
+        if (stroke.shape === "rectangle" && pixels.length >= 4) {
+          return `<polygon points="${line}" fill="none" stroke="${color}" stroke-width="${stroke.size}" stroke-linejoin="round" opacity="${opacity}"/>`;
+        }
+        const first = pixels[0];
+        const last = pixels[pixels.length - 1];
+        return `<line x1="${first.x}" y1="${first.y}" x2="${last.x}" y2="${last.y}" stroke="${color}" stroke-width="${stroke.size}" stroke-linecap="round" opacity="${opacity}"/>`;
+      }
       if (stroke.points.length === 1) {
         const point = stroke.points[0];
         return `<circle cx="${(point.x * 1000).toFixed(2)}" cy="${(point.y * 1000).toFixed(2)}" r="${Math.max(0.5, stroke.size / 2)}" fill="${color}" opacity="${opacity}"/>`;
@@ -173,6 +227,28 @@ function canvasPng(canvas: HTMLCanvasElement): Promise<ArrayBuffer> {
   });
 }
 
+function wrapCanvasText(
+  context: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number
+): string[] {
+  const lines: string[] = [];
+  for (const paragraph of text.split("\n")) {
+    let line = "";
+    for (const character of Array.from(paragraph)) {
+      const candidate = line + character;
+      if (line && context.measureText(candidate).width > maxWidth) {
+        lines.push(line);
+        line = character;
+      } else {
+        line = candidate;
+      }
+    }
+    lines.push(line);
+  }
+  return lines;
+}
+
 function drawCanvasStroke(
   context: CanvasRenderingContext2D,
   stroke: AnnotationDocument["layers"][number]["strokes"][number],
@@ -188,6 +264,77 @@ function drawCanvasStroke(
     layerOpacity * (stroke.opacity ?? (stroke.tool === "highlighter" ? 0.32 : 1));
   context.fillStyle = stroke.color;
   context.strokeStyle = stroke.color;
+  if (stroke.tool === "text") {
+    const start = stroke.points[0];
+    if (start) {
+      const fontSize = Math.max(8, stroke.fontSize ?? stroke.size ?? 24);
+      context.font = `${fontSize}px sans-serif`;
+      context.textBaseline = "top";
+      const end = stroke.points[1];
+      const maxWidth = end
+        ? Math.max(fontSize, Math.abs(end.x - start.x) * width)
+        : Number.POSITIVE_INFINITY;
+      wrapCanvasText(context, stroke.text ?? "文本", maxWidth).forEach((line, index) => {
+        context.fillText(
+          line,
+          start.x * width,
+          start.y * height + index * fontSize * 1.25
+        );
+      });
+    }
+    context.restore();
+    return;
+  }
+  if (stroke.tool === "shape") {
+    const points = stroke.points.map((point) => ({
+      x: point.x * width,
+      y: point.y * height
+    }));
+    if (points.length >= 2) {
+      context.lineWidth = stroke.size;
+      context.lineCap = "round";
+      context.lineJoin = "round";
+      context.beginPath();
+      if (stroke.shape === "curve" && points.length >= 4) {
+        context.moveTo(points[0].x, points[0].y);
+        context.bezierCurveTo(
+          points[1].x,
+          points[1].y,
+          points[2].x,
+          points[2].y,
+          points[3].x,
+          points[3].y
+        );
+      } else if (stroke.shape === "rectangle" && points.length >= 4) {
+        context.moveTo(points[0].x, points[0].y);
+        points.slice(1, 4).forEach((point) => context.lineTo(point.x, point.y));
+        context.closePath();
+      } else if (stroke.shape === "ellipse" && points.length >= 4) {
+        context.moveTo(points[0].x, points[0].y);
+        for (let index = 0; index < 4; index += 1) {
+          const previous = points[(index + 3) % 4];
+          const current = points[index];
+          const next = points[(index + 1) % 4];
+          const after = points[(index + 2) % 4];
+          context.bezierCurveTo(
+            current.x + (next.x - previous.x) / 6,
+            current.y + (next.y - previous.y) / 6,
+            next.x - (after.x - current.x) / 6,
+            next.y - (after.y - current.y) / 6,
+            next.x,
+            next.y
+          );
+        }
+        context.closePath();
+      } else {
+        context.moveTo(points[0].x, points[0].y);
+        context.lineTo(points[points.length - 1].x, points[points.length - 1].y);
+      }
+      context.stroke();
+    }
+    context.restore();
+    return;
+  }
   if (stroke.tool === "pen" || stroke.tool === "pencil") {
     drawFreehandStroke(
       context,
@@ -311,6 +458,208 @@ export async function exportAnnotatedPdf(
   await app.vault.adapter.writeBinary(path, output.buffer);
   return {
     path,
+    excludedDraftWhiteboards: document.draftWhiteboards?.length ?? 0
+  };
+}
+
+interface ZipEntry {
+  name: string;
+  data: Uint8Array;
+}
+
+function crc32(data: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const byte of data) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function zipDateTime(date = new Date()): { time: number; date: number } {
+  return {
+    time:
+      (date.getHours() << 11) |
+      (date.getMinutes() << 5) |
+      Math.floor(date.getSeconds() / 2),
+    date:
+      ((Math.max(1980, date.getFullYear()) - 1980) << 9) |
+      ((date.getMonth() + 1) << 5) |
+      date.getDate()
+  };
+}
+
+function buildZip(entries: ZipEntry[]): Uint8Array {
+  const encoder = new TextEncoder();
+  const localParts: Uint8Array[] = [];
+  const centralParts: Uint8Array[] = [];
+  const timestamp = zipDateTime();
+  let offset = 0;
+  for (const entry of entries) {
+    const name = encoder.encode(entry.name.replace(/\\/g, "/"));
+    const checksum = crc32(entry.data);
+    const local = new Uint8Array(30 + name.length + entry.data.length);
+    const localView = new DataView(local.buffer);
+    localView.setUint32(0, 0x04034b50, true);
+    localView.setUint16(4, 20, true);
+    localView.setUint16(6, 0x0800, true);
+    localView.setUint16(8, 0, true);
+    localView.setUint16(10, timestamp.time, true);
+    localView.setUint16(12, timestamp.date, true);
+    localView.setUint32(14, checksum, true);
+    localView.setUint32(18, entry.data.length, true);
+    localView.setUint32(22, entry.data.length, true);
+    localView.setUint16(26, name.length, true);
+    localView.setUint16(28, 0, true);
+    local.set(name, 30);
+    local.set(entry.data, 30 + name.length);
+    localParts.push(local);
+
+    const central = new Uint8Array(46 + name.length);
+    const centralView = new DataView(central.buffer);
+    centralView.setUint32(0, 0x02014b50, true);
+    centralView.setUint16(4, 20, true);
+    centralView.setUint16(6, 20, true);
+    centralView.setUint16(8, 0x0800, true);
+    centralView.setUint16(10, 0, true);
+    centralView.setUint16(12, timestamp.time, true);
+    centralView.setUint16(14, timestamp.date, true);
+    centralView.setUint32(16, checksum, true);
+    centralView.setUint32(20, entry.data.length, true);
+    centralView.setUint32(24, entry.data.length, true);
+    centralView.setUint16(28, name.length, true);
+    centralView.setUint16(30, 0, true);
+    centralView.setUint16(32, 0, true);
+    centralView.setUint16(34, 0, true);
+    centralView.setUint16(36, 0, true);
+    centralView.setUint32(38, 0, true);
+    centralView.setUint32(42, offset, true);
+    central.set(name, 46);
+    centralParts.push(central);
+    offset += local.length;
+  }
+
+  const centralSize = centralParts.reduce((total, part) => total + part.length, 0);
+  const end = new Uint8Array(22);
+  const endView = new DataView(end.buffer);
+  endView.setUint32(0, 0x06054b50, true);
+  endView.setUint16(8, entries.length, true);
+  endView.setUint16(10, entries.length, true);
+  endView.setUint32(12, centralSize, true);
+  endView.setUint32(16, offset, true);
+
+  const output = new Uint8Array(offset + centralSize + end.length);
+  let cursor = 0;
+  for (const part of [...localParts, ...centralParts, end]) {
+    output.set(part, cursor);
+    cursor += part.length;
+  }
+  return output;
+}
+
+function safeFileName(value: string): string {
+  return value.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim() || "未命名图层";
+}
+
+function singleLayerSvg(
+  layer: AnnotationDocument["layers"][number],
+  pageIndex?: number
+): string {
+  const opacity = layer.opacity > 0 ? layer.opacity : 1;
+  const strokes = layer.strokes.filter((stroke) => stroke.pageIndex === pageIndex);
+  let background = "";
+  let definitions = "";
+  let content = strokeSvg(strokes, opacity);
+  if (layer.whiteboard?.bounds.pageIndex === pageIndex) {
+    const bounds = layer.whiteboard.bounds;
+    const x = bounds.minX * 1000;
+    const y = bounds.minY * 1000;
+    const width = (bounds.maxX - bounds.minX) * 1000;
+    const height = (bounds.maxY - bounds.minY) * 1000;
+    definitions = `<clipPath id="whiteboard"><rect x="${x}" y="${y}" width="${width}" height="${height}"/></clipPath>`;
+    background = `<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="${xmlEscape(
+      layer.whiteboard.background
+    )}" opacity="${opacity}"/>`;
+    content = `<g clip-path="url(#whiteboard)">${background}${content}</g>`;
+  }
+  return `<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000" preserveAspectRatio="none" data-visible="${layer.visible}" data-opacity="${layer.opacity}"><defs>${definitions}</defs>${content}</svg>`;
+}
+
+export async function exportLayerPackage(
+  app: App,
+  source: TFile,
+  document: AnnotationDocument
+): Promise<LayerPackageExportResult> {
+  const encoder = new TextEncoder();
+  const exported = withoutDraftWhiteboards(document);
+  const entries: ZipEntry[] = [
+    {
+      name: `原始文件/${source.name}`,
+      data: new Uint8Array(await app.vault.readBinary(source))
+    },
+    {
+      name: "图层数据/annotation.json",
+      data: encoder.encode(JSON.stringify(exported, null, 2))
+    }
+  ];
+  exported.layers.forEach((layer, index) => {
+    const pages = new Set<number | undefined>();
+    layer.strokes.forEach((stroke) => pages.add(stroke.pageIndex));
+    if (layer.whiteboard) {
+      pages.add(layer.whiteboard.bounds.pageIndex);
+    }
+    if (pages.size === 0) {
+      pages.add(undefined);
+    }
+    const folder = `${String(index + 1).padStart(3, "0")}-${safeFileName(layer.name)}`;
+    [...pages]
+      .sort((a, b) => (a ?? 0) - (b ?? 0))
+      .forEach((pageIndex) => {
+        const name = pageIndex === undefined ? "标注.svg" : `第${pageIndex}页.svg`;
+        entries.push({
+          name: `图层/${folder}/${name}`,
+          data: encoder.encode(singleLayerSvg(layer, pageIndex))
+        });
+      });
+  });
+  entries.push({
+    name: "导出清单.json",
+    data: encoder.encode(
+      JSON.stringify(
+        {
+          format: "hand-note-layers-layer-package",
+          formatVersion: 1,
+          exportedAt: new Date().toISOString(),
+          sourcePath: source.path,
+          layerCount: exported.layers.length,
+          layers: exported.layers.map((layer, index) => ({
+            order: index + 1,
+            id: layer.id,
+            name: layer.name,
+            visible: layer.visible,
+            opacity: layer.opacity,
+            whiteboard: Boolean(layer.whiteboard)
+          })),
+          note: "图层包包含所有已保存图层；未保存的临时白板不会进入导出。"
+        },
+        null,
+        2
+      )
+    )
+  });
+  const bytes = buildZip(entries);
+  await ensureFolder(app, EXPORT_ROOT);
+  const path = normalizePath(
+    `${EXPORT_ROOT}/${exportTimestamp()}-${source.basename}-图层包.zip`
+  );
+  const output = new Uint8Array(bytes.byteLength);
+  output.set(bytes);
+  await app.vault.adapter.writeBinary(path, output.buffer);
+  return {
+    path,
+    layerCount: exported.layers.length,
     excludedDraftWhiteboards: document.draftWhiteboards?.length ?? 0
   };
 }

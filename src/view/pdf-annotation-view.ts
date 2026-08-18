@@ -12,12 +12,16 @@ import {
   AnnotationTool,
   EraserMode,
   SelectionMode,
+  ShapeKind,
   cloneDocument,
   createLayer,
   getActiveLayer,
   nextLayerName
 } from "../model/annotation";
-import { exportAnnotatedPdf } from "../export/annotation-export";
+import {
+  exportAnnotatedPdf,
+  exportLayerPackage
+} from "../export/annotation-export";
 import {
   loadAnnotation,
   saveAnnotation
@@ -86,12 +90,15 @@ export class PdfAnnotationView extends ItemView {
     pencil: 3,
     highlighter: 18,
     eraser: 28,
-    select: 4
+    select: 4,
+    text: 24,
+    shape: 4
   };
   private pressureEnabled = true;
   private pencilShortcutEnabled = true;
   private eraserMode: EraserMode = "partial";
   private selectionMode: SelectionMode = "free";
+  private shapeKind: ShapeKind = "rectangle";
   private pageScale = 1;
   private saveTimer: number | null = null;
 
@@ -251,6 +258,7 @@ export class PdfAnnotationView extends ItemView {
       initialPencilShortcutEnabled: this.pencilShortcutEnabled,
       initialEraserMode: this.eraserMode,
       initialSelectionMode: this.selectionMode,
+      initialShapeKind: this.shapeKind,
       getSize: (tool) => this.toolSizes[tool],
       onToolChange: (tool) => this.setTool(tool),
       onColorChange: (color) => this.setColor(color),
@@ -271,12 +279,15 @@ export class PdfAnnotationView extends ItemView {
       onSelectionModeChange: (mode) => {
         this.selectionMode = mode;
       },
+      onShapeKindChange: (kind) => {
+        this.shapeKind = kind;
+      },
       onWhiteboard: () => void this.toggleWhiteboard(),
       onUndo: () => this.currentInkCanvas()?.undo(),
       onRedo: () => this.currentInkCanvas()?.redo(),
       onClear: () => this.currentInkCanvas()?.clearActiveLayer(),
       onSave: () => void this.flushSave(),
-      onExport: () => void this.exportPdf(),
+      onExport: (mode) => void this.exportDocument(mode),
       onLayers: () => {
         this.toggleLayerPanel(!this.layerPanel?.element.classList.contains("is-open"));
       },
@@ -458,6 +469,7 @@ export class PdfAnnotationView extends ItemView {
       getEraserSize: () => this.toolSizes.eraser,
       getEraserMode: () => this.eraserMode,
       getSelectionMode: () => this.selectionMode,
+      getShapeKind: () => this.shapeKind,
       getPressureEnabled: () => this.pressureEnabled,
       onDocumentChange: (next, renderCanvas) =>
         this.handleDocumentChange(next, renderCanvas, false),
@@ -486,7 +498,8 @@ export class PdfAnnotationView extends ItemView {
       inkCanvas.liveCanvas,
       inkCanvas.selectionOutline,
       inkCanvas.selectionTransform,
-      inkCanvas.selectionMenu
+      inkCanvas.selectionMenu,
+      inkCanvas.shapeControls
     );
     inkCanvas.render();
   }
@@ -709,6 +722,7 @@ export class PdfAnnotationView extends ItemView {
       getSize: () => this.toolSizes[this.currentTool],
       getEraserSize: () => this.toolSizes.eraser,
       getEraserMode: () => this.eraserMode,
+      getShapeKind: () => this.shapeKind,
       getPressureEnabled: () => this.pressureEnabled,
       onActivate: () => {
         this.activeInkTarget = "whiteboard";
@@ -772,6 +786,7 @@ export class PdfAnnotationView extends ItemView {
       getSize: () => this.toolSizes[this.currentTool],
       getEraserSize: () => this.toolSizes.eraser,
       getEraserMode: () => this.eraserMode,
+      getShapeKind: () => this.shapeKind,
       getPressureEnabled: () => this.pressureEnabled,
       onActivate: () => {
         this.activeInkTarget = "whiteboard";
@@ -805,6 +820,7 @@ export class PdfAnnotationView extends ItemView {
     replacement.id = previous.id;
     replacement.name = previous.name;
     replacement.opacity = previous.opacity;
+    replacement.lastNonZeroOpacity = previous.lastNonZeroOpacity;
     replacement.visible = !hide;
     this.document.layers[index] = replacement;
     this.document.draftWhiteboards = (this.document.draftWhiteboards ?? []).filter(
@@ -875,6 +891,7 @@ export class PdfAnnotationView extends ItemView {
       layer.id = existing.id;
       layer.name = existing.name;
       layer.opacity = existing.opacity;
+      layer.lastNonZeroOpacity = existing.lastNonZeroOpacity;
       layer.visible = true;
       this.document.layers[existingIndex] = layer;
     } else {
@@ -937,6 +954,31 @@ export class PdfAnnotationView extends ItemView {
     } catch (error) {
       console.error("Hand Note Layers: failed to export annotated PDF", error);
       new Notice("带批注 PDF 导出失败，请查看开发者控制台");
+    }
+  }
+
+  private async exportDocument(mode: "pdf" | "layers"): Promise<void> {
+    if (mode === "pdf") {
+      await this.exportPdf();
+      return;
+    }
+    if (!this.sourceFile || !this.document) {
+      return;
+    }
+    try {
+      await this.flushSave();
+      const result = await exportLayerPackage(
+        this.app,
+        this.sourceFile,
+        cloneDocument(this.document)
+      );
+      const drafts = result.excludedDraftWhiteboards
+        ? `，已排除 ${result.excludedDraftWhiteboards} 个未保存白板`
+        : "";
+      new Notice(`图层包已导出到 ${result.path}${drafts}`, 8000);
+    } catch (error) {
+      console.error("Hand Note Layers: failed to export layer package", error);
+      new Notice("图层包导出失败，请查看开发者控制台");
     }
   }
 
@@ -1031,6 +1073,9 @@ export class PdfAnnotationView extends ItemView {
       return;
     }
     layer.visible = true;
+    if (layer.opacity <= 0) {
+      layer.opacity = layer.lastNonZeroOpacity ?? 1;
+    }
     this.document.activeLayerId = layerId;
     this.handleDocumentChange(this.document);
   }
@@ -1069,7 +1114,10 @@ export class PdfAnnotationView extends ItemView {
     if (!layer) {
       return;
     }
-    layer.opacity = opacity;
+    layer.opacity = Math.max(0, Math.min(1, opacity));
+    if (layer.opacity > 0) {
+      layer.lastNonZeroOpacity = layer.opacity;
+    }
     this.handleDocumentChange(this.document as AnnotationDocument, true, false);
   }
 

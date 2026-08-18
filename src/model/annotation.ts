@@ -4,7 +4,11 @@ export type AnnotationTool =
   | "pencil"
   | "highlighter"
   | "eraser"
-  | "select";
+  | "select"
+  | "text"
+  | "shape";
+
+export type ShapeKind = "line" | "rectangle" | "ellipse" | "curve";
 
 export type EraserMode = "partial" | "stroke";
 export type SelectionMode = "all" | "rectangle" | "free";
@@ -31,6 +35,9 @@ export interface AnnotationStroke {
   opacity?: number;
   points: StrokePoint[];
   pageIndex?: number;
+  shape?: ShapeKind;
+  text?: string;
+  fontSize?: number;
 }
 
 export interface AnnotationLayer {
@@ -38,6 +45,7 @@ export interface AnnotationLayer {
   name: string;
   visible: boolean;
   opacity: number;
+  lastNonZeroOpacity?: number;
   strokes: AnnotationStroke[];
   whiteboard?: {
     bounds: AnnotationBounds;
@@ -95,6 +103,7 @@ export function createLayer(name: string): AnnotationLayer {
     name,
     visible: true,
     opacity: 1,
+    lastNonZeroOpacity: 1,
     strokes: []
   };
 }

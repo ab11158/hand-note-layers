@@ -4,6 +4,7 @@ import {
   AnnotationLayer,
   AnnotationTool,
   EraserMode,
+  ShapeKind,
   WhiteboardDraft,
   createEmptyDocument,
   generateId
@@ -27,6 +28,7 @@ export interface TemporaryWhiteboardOptions {
   getSize: () => number;
   getEraserSize: () => number;
   getEraserMode: () => EraserMode;
+  getShapeKind: () => ShapeKind;
   getPressureEnabled: () => boolean;
   onActivate: () => void;
   onChange?: (draft: WhiteboardDraft) => void;
@@ -149,6 +151,7 @@ export class TemporaryWhiteboard {
       getSize: options.getSize,
       getEraserSize: options.getEraserSize,
       getEraserMode: options.getEraserMode,
+      getShapeKind: options.getShapeKind,
       getPressureEnabled: options.getPressureEnabled,
       onDocumentChange: (next) => {
         this.document = next;
@@ -166,7 +169,8 @@ export class TemporaryWhiteboard {
       this.inkCanvas.liveCanvas,
       this.inkCanvas.selectionOutline,
       this.inkCanvas.selectionTransform,
-      this.inkCanvas.selectionMenu
+      this.inkCanvas.selectionMenu,
+      this.inkCanvas.shapeControls
     );
     this.applyBounds();
     this.updateViewport();

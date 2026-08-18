@@ -35,7 +35,9 @@ function migrateTool(tool: unknown): AnnotationDocument["layers"][number]["strok
     tool === "pen" ||
     tool === "pencil" ||
     tool === "highlighter" ||
-    tool === "eraser"
+    tool === "eraser" ||
+    tool === "text" ||
+    tool === "shape"
   ) {
     return tool;
   }
@@ -60,6 +62,8 @@ function migrateDocument(value: unknown, sourcePath: string): AnnotationDocument
           : "图层1",
       visible: layer.visible ?? true,
       opacity: layer.opacity ?? 1,
+      lastNonZeroOpacity:
+        layer.lastNonZeroOpacity ?? ((layer.opacity ?? 1) > 0 ? layer.opacity ?? 1 : 1),
       whiteboard: layer.whiteboard,
       strokes: Array.isArray(layer.strokes)
         ? layer.strokes.map((stroke) => ({
@@ -76,7 +80,10 @@ function migrateDocument(value: unknown, sourcePath: string): AnnotationDocument
                   pressure: point.pressure ?? 0.5
                 }))
               : [],
-            pageIndex: stroke.pageIndex
+            pageIndex: stroke.pageIndex,
+            shape: stroke.shape,
+            text: stroke.text,
+            fontSize: stroke.fontSize
           }))
         : []
     })),

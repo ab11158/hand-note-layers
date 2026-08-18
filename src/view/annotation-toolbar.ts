@@ -1,5 +1,10 @@
 import { setIcon } from "obsidian";
-import { AnnotationTool, EraserMode, SelectionMode } from "../model/annotation";
+import {
+  AnnotationTool,
+  EraserMode,
+  SelectionMode,
+  ShapeKind
+} from "../model/annotation";
 import { createIconButton, createLabeledSlider, createToolbar } from "./ui";
 
 export type AnnotationSaveStatus = "saved" | "saving" | "error";
@@ -11,6 +16,7 @@ export interface AnnotationToolbarOptions {
   initialPencilShortcutEnabled: boolean;
   initialEraserMode: EraserMode;
   initialSelectionMode: SelectionMode;
+  initialShapeKind: ShapeKind;
   getSize: (tool: AnnotationTool) => number;
   onToolChange: (tool: AnnotationTool) => void;
   onColorChange: (color: string) => void;
@@ -19,12 +25,13 @@ export interface AnnotationToolbarOptions {
   onPencilShortcutChange: (enabled: boolean) => void;
   onEraserModeChange: (mode: EraserMode) => void;
   onSelectionModeChange: (mode: SelectionMode) => void;
+  onShapeKindChange: (kind: ShapeKind) => void;
   onWhiteboard: () => void;
   onUndo: () => void;
   onRedo: () => void;
   onClear: () => void;
   onSave: () => void;
-  onExport?: () => void;
+  onExport?: (mode: "pdf" | "layers") => void;
   onLayers: () => void;
   navigationControls?: HTMLElement[];
 }
@@ -74,6 +81,9 @@ export class AnnotationToolbar {
   private readonly eraserModeButtons = new Map<EraserMode, HTMLButtonElement>();
   private readonly selectionMenu: HTMLDivElement;
   private readonly selectionModeButtons = new Map<SelectionMode, HTMLButtonElement>();
+  private readonly shapeMenu: HTMLDivElement;
+  private readonly shapeKindButtons = new Map<ShapeKind, HTMLButtonElement>();
+  private currentShapeKind: ShapeKind;
   private readonly whiteboardButton: HTMLButtonElement;
   private readonly saveButton: HTMLButtonElement;
   private readonly saveStatus: HTMLSpanElement;
@@ -82,6 +92,7 @@ export class AnnotationToolbar {
   constructor(options: AnnotationToolbarOptions) {
     this.options = options;
     this.currentTool = options.initialTool;
+    this.currentShapeKind = options.initialShapeKind;
     this.element = createToolbar();
     this.colorSlots = this.loadColorSlots();
     const initialSlot = this.colorSlots.findIndex(
@@ -96,6 +107,14 @@ export class AnnotationToolbar {
       this.createSelectionModeButton("all", "全选", "scan"),
       this.createSelectionModeButton("rectangle", "框选", "box-select"),
       this.createSelectionModeButton("free", "自由套索", "lasso-select")
+    );
+    this.shapeMenu = document.createElement("div");
+    this.shapeMenu.className = "hand-note-eraser-menu hand-note-shape-menu";
+    this.shapeMenu.append(
+      this.createShapeKindButton("line", "直线", "minus"),
+      this.createShapeKindButton("rectangle", "矩形", "square"),
+      this.createShapeKindButton("ellipse", "椭圆", "circle"),
+      this.createShapeKindButton("curve", "光滑曲线", "spline")
     );
 
     const toolGroup = this.createGroup();
@@ -171,11 +190,29 @@ export class AnnotationToolbar {
     this.sizeControl = createLabeledSlider(
       "粗细",
       1,
-      24,
+      48,
       1,
       options.getSize(options.initialTool),
       (value) => options.onSizeChange(this.currentTool, value)
     );
+
+    const objectGroup = this.createGroup();
+    const textButton = createIconButton("type", "文本框");
+    textButton.addEventListener("click", () => options.onToolChange("text"));
+    this.toolButtons.set("text", textButton);
+    const shapeButton = createIconButton("shapes", "图形");
+    shapeButton.addEventListener("click", () => {
+      if (this.currentTool === "shape") {
+        this.shapeMenu.classList.toggle("is-open");
+      } else {
+        options.onToolChange("shape");
+      }
+    });
+    this.toolButtons.set("shape", shapeButton);
+    const shapeWrapper = document.createElement("div");
+    shapeWrapper.className = "hand-note-tool-menu-wrap";
+    shapeWrapper.append(shapeButton, this.shapeMenu);
+    objectGroup.append(textButton, shapeWrapper);
 
     const inputGroup = this.createGroup();
     this.pressureButton = createIconButton("gauge", "压感笔宽");
@@ -202,9 +239,24 @@ export class AnnotationToolbar {
     layerButton.addEventListener("click", options.onLayers);
     documentGroup.append(this.saveButton, this.saveStatus);
     if (options.onExport) {
-      const exportButton = createIconButton("download", "导出带批注 PDF");
-      exportButton.addEventListener("click", options.onExport);
-      documentGroup.append(exportButton);
+      const exportButton = createIconButton("download", "导出");
+      const exportMenu = document.createElement("div");
+      exportMenu.className = "hand-note-eraser-menu hand-note-export-menu";
+      exportMenu.append(
+        this.createExportButton("file-down", "合成 PDF", () =>
+          options.onExport?.("pdf")
+        ),
+        this.createExportButton("package", "导出图层包 ZIP", () =>
+          options.onExport?.("layers")
+        )
+      );
+      exportButton.addEventListener("click", () =>
+        exportMenu.classList.toggle("is-open")
+      );
+      const exportWrapper = document.createElement("div");
+      exportWrapper.className = "hand-note-tool-menu-wrap";
+      exportWrapper.append(exportButton, exportMenu);
+      documentGroup.append(exportWrapper);
     }
     documentGroup.append(layerButton);
 
@@ -213,6 +265,8 @@ export class AnnotationToolbar {
       this.createDivider(),
       colorGroup,
       this.sizeControl.element,
+      this.createDivider(),
+      objectGroup,
       this.createDivider(),
       historyGroup
     );
@@ -234,6 +288,7 @@ export class AnnotationToolbar {
     this.setPencilShortcutEnabled(options.initialPencilShortcutEnabled);
     this.setEraserMode(options.initialEraserMode);
     this.setSelectionMode(options.initialSelectionMode);
+    this.setShapeKind(options.initialShapeKind);
     this.setSaveStatus("saved");
   }
 
@@ -245,6 +300,9 @@ export class AnnotationToolbar {
     if (tool !== "select") {
       this.selectionMenu.classList.remove("is-open");
     }
+    if (tool !== "shape") {
+      this.shapeMenu.classList.remove("is-open");
+    }
     for (const [candidate, button] of this.toolButtons) {
       button.classList.toggle("is-active", candidate === tool);
       button.setAttribute("aria-pressed", String(candidate === tool));
@@ -254,11 +312,13 @@ export class AnnotationToolbar {
     const isSelection = tool === "select";
     const isEraser = tool === "eraser";
     const isHighlighter = tool === "highlighter";
+    const isText = tool === "text";
+    const isShape = tool === "shape";
     this.sizeControl.setDisabled(isHand || isSelection);
-    this.sizeControl.setLabel(isEraser ? "橡皮" : "粗细");
+    this.sizeControl.setLabel(isEraser ? "橡皮" : isText ? "字号" : "粗细");
     this.sizeControl.setRange(
-      isEraser ? 8 : 1,
-      isEraser ? 80 : isHighlighter ? 48 : 24,
+      isEraser ? 8 : isText ? 12 : 1,
+      isEraser ? 80 : isText ? 72 : isHighlighter || isShape ? 48 : 48,
       1
     );
     this.sizeControl.setValue(this.options.getSize(tool));
@@ -301,6 +361,17 @@ export class AnnotationToolbar {
       button.classList.toggle("is-active", candidate === mode);
       button.setAttribute("aria-pressed", String(candidate === mode));
     }
+  }
+
+  setShapeKind(kind: ShapeKind): void {
+    this.currentShapeKind = kind;
+    for (const [candidate, button] of this.shapeKindButtons) {
+      button.classList.toggle("is-active", candidate === kind);
+      button.setAttribute("aria-pressed", String(candidate === kind));
+    }
+    const shapeButton = this.toolButtons.get("shape");
+    shapeButton?.setAttribute("aria-label", `图形：${this.shapeKindLabel(kind)}`);
+    shapeButton?.setAttribute("title", `图形：${this.shapeKindLabel(kind)}`);
   }
 
   setWhiteboardActive(active: boolean): void {
@@ -378,6 +449,60 @@ export class AnnotationToolbar {
     });
     this.selectionModeButtons.set(mode, button);
     return button;
+  }
+
+  private createShapeKindButton(
+    kind: ShapeKind,
+    label: string,
+    icon: string
+  ): HTMLButtonElement {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "hand-note-eraser-option";
+    button.setAttribute("aria-label", label);
+    setIcon(button, icon);
+    const text = document.createElement("span");
+    text.textContent = label;
+    button.append(text);
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.options.onShapeKindChange(kind);
+      this.setShapeKind(kind);
+      this.options.onToolChange("shape");
+      this.shapeMenu.classList.remove("is-open");
+    });
+    this.shapeKindButtons.set(kind, button);
+    return button;
+  }
+
+  private createExportButton(
+    icon: string,
+    label: string,
+    onClick: () => void
+  ): HTMLButtonElement {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "hand-note-eraser-option";
+    button.setAttribute("aria-label", label);
+    setIcon(button, icon);
+    const text = document.createElement("span");
+    text.textContent = label;
+    button.append(text);
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      onClick();
+      button.closest(".hand-note-export-menu")?.classList.remove("is-open");
+    });
+    return button;
+  }
+
+  private shapeKindLabel(kind: ShapeKind): string {
+    return {
+      line: "直线",
+      rectangle: "矩形",
+      ellipse: "椭圆",
+      curve: "光滑曲线"
+    }[kind];
   }
 
   private buildColorMenu(): void {

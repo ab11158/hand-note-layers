@@ -529,13 +529,16 @@
 }
 
 .hand-note-layer-row {
-  align-items: center;
   border: 1px solid transparent;
   border-radius: 6px;
-  display: flex;
-  gap: 6px;
   margin-bottom: 6px;
   padding: 7px;
+}
+
+.hand-note-layer-controls {
+  align-items: center;
+  display: flex;
+  gap: 6px;
 }
 
 .hand-note-layer-row.is-active {
@@ -571,19 +574,107 @@
   align-items: center;
   display: flex;
   gap: 6px;
+  margin: 7px 2px 0 42px;
+  min-height: 30px;
 }
 
 .hand-note-layer-opacity {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
   flex: 1 1 auto;
   height: 28px;
-  min-width: 0;
-  touch-action: pan-y;
+  min-width: 96px;
+  pointer-events: auto;
+  touch-action: none;
+  width: 100%;
+  accent-color: var(--interactive-accent);
+}
+
+.hand-note-layer-opacity::-webkit-slider-runnable-track {
+  background: var(--background-modifier-border);
+  border-radius: 999px;
+  height: 5px;
+}
+
+.hand-note-layer-opacity::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  background: var(--interactive-accent);
+  border: 2px solid var(--background-primary);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--interactive-accent);
+  height: 20px;
+  margin-top: -7px;
+  width: 20px;
+}
+
+.hand-note-layer-opacity::-moz-range-track {
+  background: var(--background-modifier-border);
+  border-radius: 999px;
+  height: 5px;
+}
+
+.hand-note-layer-opacity::-moz-range-thumb {
+  background: var(--interactive-accent);
+  border: 2px solid var(--background-primary);
+  border-radius: 50%;
+  height: 16px;
+  width: 16px;
 }
 
 .hand-note-layer-opacity-value {
   flex: 0 0 36px;
   font-size: var(--font-ui-smaller);
   text-align: right;
+}
+
+.hand-note-shape-overlay {
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 8;
+}
+
+.hand-note-shape-anchor {
+  appearance: none;
+  background: var(--interactive-accent);
+  border: 2px solid var(--background-primary);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--interactive-accent);
+  display: none;
+  height: 16px;
+  margin: -8px 0 0 -8px;
+  padding: 0;
+  pointer-events: auto;
+  position: absolute;
+  touch-action: none;
+  width: 16px;
+}
+
+.hand-note-shape-anchor.is-visible {
+  display: block;
+}
+
+.hand-note-text-editor {
+  background: var(--background-primary);
+  border: 1px solid var(--interactive-accent);
+  border-radius: 4px;
+  box-sizing: border-box;
+  display: none;
+  font-family: var(--font-text);
+  line-height: 1.25;
+  min-height: 48px;
+  min-width: 120px;
+  padding: 5px;
+  position: absolute;
+  resize: both;
+  touch-action: manipulation;
+  z-index: 9;
+}
+
+.hand-note-text-editor.is-visible {
+  display: block;
 }
 
 .hand-note-layer-footer {

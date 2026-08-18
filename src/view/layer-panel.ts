@@ -196,8 +196,18 @@ export class LayerPanel {
       }
     });
 
-    content.append(name, opacityRow);
-    row.append(visibilityButton, content, editButton, moveUp, moveDown, deleteButton);
+    content.append(name);
+    const controls = document.createElement("div");
+    controls.className = "hand-note-layer-controls";
+    controls.append(
+      visibilityButton,
+      content,
+      editButton,
+      moveUp,
+      moveDown,
+      deleteButton
+    );
+    row.append(controls, opacityRow);
     return row;
   }
 }
