@@ -2,10 +2,17 @@ import { setIcon } from "obsidian";
 import {
   AnnotationTool,
   EraserMode,
+  ShapeArrowHead,
   SelectionMode,
-  ShapeKind
+  ShapeKind,
+  ShapeLineStyle
 } from "../model/annotation";
-import { createIconButton, createLabeledSlider, createToolbar } from "./ui";
+import {
+  createIconButton,
+  createLabeledSlider,
+  createToolbar,
+  setControlTooltip
+} from "./ui";
 
 export type AnnotationSaveStatus = "saved" | "saving" | "error";
 
@@ -17,6 +24,10 @@ export interface AnnotationToolbarOptions {
   initialEraserMode: EraserMode;
   initialSelectionMode: SelectionMode;
   initialShapeKind: ShapeKind;
+  initialShapeLineStyle: ShapeLineStyle;
+  initialShapeStartArrow: ShapeArrowHead;
+  initialShapeEndArrow: ShapeArrowHead;
+  initialShapeFillEnabled: boolean;
   getSize: (tool: AnnotationTool) => number;
   onToolChange: (tool: AnnotationTool) => void;
   onColorChange: (color: string) => void;
@@ -26,6 +37,10 @@ export interface AnnotationToolbarOptions {
   onEraserModeChange: (mode: EraserMode) => void;
   onSelectionModeChange: (mode: SelectionMode) => void;
   onShapeKindChange: (kind: ShapeKind) => void;
+  onShapeLineStyleChange: (style: ShapeLineStyle) => void;
+  onShapeArrowChange: (position: "start" | "end", arrow: ShapeArrowHead) => void;
+  onShapeFillChange: (enabled: boolean) => void;
+  onPaste: () => void;
   onWhiteboard: () => void;
   onUndo: () => void;
   onRedo: () => void;
@@ -75,6 +90,8 @@ export class AnnotationToolbar {
   private readonly colorMenu: HTMLDivElement;
   private activeColorSlot = 0;
   private readonly sizeControl;
+  private readonly sizeMenu: HTMLDivElement;
+  private readonly sizeButton: HTMLButtonElement;
   private readonly pressureButton: HTMLButtonElement;
   private readonly pencilShortcutButton: HTMLButtonElement;
   private readonly eraserMenu: HTMLDivElement;
@@ -83,7 +100,16 @@ export class AnnotationToolbar {
   private readonly selectionModeButtons = new Map<SelectionMode, HTMLButtonElement>();
   private readonly shapeMenu: HTMLDivElement;
   private readonly shapeKindButtons = new Map<ShapeKind, HTMLButtonElement>();
+  private readonly shapeLineStyleButtons = new Map<ShapeLineStyle, HTMLButtonElement>();
+  private readonly shapeStartArrowButton: HTMLButtonElement;
+  private readonly shapeEndArrowButton: HTMLButtonElement;
+  private readonly shapeFillButton: HTMLButtonElement;
+  private readonly pasteButton: HTMLButtonElement;
   private currentShapeKind: ShapeKind;
+  private currentShapeLineStyle: ShapeLineStyle;
+  private currentShapeStartArrow: ShapeArrowHead;
+  private currentShapeEndArrow: ShapeArrowHead;
+  private shapeFillEnabled: boolean;
   private readonly whiteboardButton: HTMLButtonElement;
   private readonly saveButton: HTMLButtonElement;
   private readonly saveStatus: HTMLSpanElement;
@@ -93,6 +119,10 @@ export class AnnotationToolbar {
     this.options = options;
     this.currentTool = options.initialTool;
     this.currentShapeKind = options.initialShapeKind;
+    this.currentShapeLineStyle = options.initialShapeLineStyle;
+    this.currentShapeStartArrow = options.initialShapeStartArrow;
+    this.currentShapeEndArrow = options.initialShapeEndArrow;
+    this.shapeFillEnabled = options.initialShapeFillEnabled;
     this.element = createToolbar();
     this.colorSlots = this.loadColorSlots();
     const initialSlot = this.colorSlots.findIndex(
@@ -110,11 +140,23 @@ export class AnnotationToolbar {
     );
     this.shapeMenu = document.createElement("div");
     this.shapeMenu.className = "hand-note-eraser-menu hand-note-shape-menu";
+    this.shapeStartArrowButton = this.createShapeArrowButton("start");
+    this.shapeEndArrowButton = this.createShapeArrowButton("end");
+    this.shapeFillButton = this.createShapeFillButton();
     this.shapeMenu.append(
-      this.createShapeKindButton("line", "直线", "minus"),
+      this.createShapeKindButton("line", "直线与折线", "minus"),
       this.createShapeKindButton("rectangle", "矩形", "square"),
       this.createShapeKindButton("ellipse", "椭圆", "circle"),
-      this.createShapeKindButton("curve", "光滑曲线", "spline")
+      this.createShapeKindButton("curve", "光滑曲线", "spline"),
+      this.createShapeKindButton("connector-straight", "直线连接器", "move-right"),
+      this.createShapeKindButton("connector-elbow", "直角连接器", "corner-down-right"),
+      this.createShapeKindButton("connector-curve", "曲线连接器", "git-commit-horizontal"),
+      this.createShapeLineStyleButton("solid", "实线", "minus"),
+      this.createShapeLineStyleButton("dashed", "虚线", "ellipsis"),
+      this.createShapeLineStyleButton("dotted", "点线", "more-horizontal"),
+      this.shapeStartArrowButton,
+      this.shapeEndArrowButton,
+      this.shapeFillButton
     );
 
     const toolGroup = this.createGroup();
@@ -122,11 +164,11 @@ export class AnnotationToolbar {
       const button = createIconButton(config.icon, config.label);
       button.addEventListener("click", () => {
         if (config.tool === "eraser" && this.currentTool === "eraser") {
-          this.eraserMenu.classList.toggle("is-open");
+          this.toggleFloatingMenu(this.eraserMenu, button);
           return;
         }
         if (config.tool === "select" && this.currentTool === "select") {
-          this.selectionMenu.classList.toggle("is-open");
+          this.toggleFloatingMenu(this.selectionMenu, button);
           return;
         }
         this.eraserMenu.classList.remove("is-open");
@@ -153,6 +195,9 @@ export class AnnotationToolbar {
         toolGroup.append(button);
       }
     }
+    this.pasteButton = createIconButton("clipboard-paste", "粘贴到当前图层");
+    this.pasteButton.addEventListener("click", options.onPaste);
+    toolGroup.append(this.pasteButton);
     this.whiteboardButton = createIconButton("presentation", "临时白板");
     this.whiteboardButton.addEventListener("click", options.onWhiteboard);
     toolGroup.append(this.whiteboardButton);
@@ -173,13 +218,12 @@ export class AnnotationToolbar {
       swatch.className = "hand-note-color-swatch";
       swatch.style.setProperty("--hand-note-swatch", color);
       swatch.style.backgroundColor = color;
-      swatch.setAttribute("aria-label", `颜色位 ${index + 1}`);
-      swatch.setAttribute("title", `颜色位 ${index + 1}`);
+      setControlTooltip(swatch, `颜色位 ${index + 1}`);
       swatch.addEventListener("click", () => {
         this.activeColorSlot = index;
         options.onColorChange(this.colorSlots[index]);
         this.setColor(this.colorSlots[index]);
-        this.colorMenu.classList.toggle("is-open");
+        this.toggleFloatingMenu(this.colorMenu, swatch);
       });
       this.colorButtons.push(swatch);
       colorGroup.append(swatch);
@@ -195,6 +239,16 @@ export class AnnotationToolbar {
       options.getSize(options.initialTool),
       (value) => options.onSizeChange(this.currentTool, value)
     );
+    this.sizeButton = createIconButton("sliders-horizontal", "调整粗细或字号");
+    this.sizeMenu = document.createElement("div");
+    this.sizeMenu.className = "hand-note-eraser-menu hand-note-size-menu";
+    this.sizeMenu.append(this.sizeControl.element);
+    this.sizeButton.addEventListener("click", () =>
+      this.toggleFloatingMenu(this.sizeMenu, this.sizeButton)
+    );
+    const sizeWrapper = document.createElement("div");
+    sizeWrapper.className = "hand-note-tool-menu-wrap";
+    sizeWrapper.append(this.sizeButton, this.sizeMenu);
 
     const objectGroup = this.createGroup();
     const textButton = createIconButton("type", "文本框");
@@ -203,7 +257,7 @@ export class AnnotationToolbar {
     const shapeButton = createIconButton("shapes", "图形");
     shapeButton.addEventListener("click", () => {
       if (this.currentTool === "shape") {
-        this.shapeMenu.classList.toggle("is-open");
+        this.toggleFloatingMenu(this.shapeMenu, shapeButton);
       } else {
         options.onToolChange("shape");
       }
@@ -251,7 +305,7 @@ export class AnnotationToolbar {
         )
       );
       exportButton.addEventListener("click", () =>
-        exportMenu.classList.toggle("is-open")
+        this.toggleFloatingMenu(exportMenu, exportButton)
       );
       const exportWrapper = document.createElement("div");
       exportWrapper.className = "hand-note-tool-menu-wrap";
@@ -264,7 +318,7 @@ export class AnnotationToolbar {
       toolGroup,
       this.createDivider(),
       colorGroup,
-      this.sizeControl.element,
+      sizeWrapper,
       this.createDivider(),
       objectGroup,
       this.createDivider(),
@@ -289,6 +343,11 @@ export class AnnotationToolbar {
     this.setEraserMode(options.initialEraserMode);
     this.setSelectionMode(options.initialSelectionMode);
     this.setShapeKind(options.initialShapeKind);
+    this.setShapeLineStyle(options.initialShapeLineStyle);
+    this.setShapeArrow("start", options.initialShapeStartArrow);
+    this.setShapeArrow("end", options.initialShapeEndArrow);
+    this.setShapeFillEnabled(options.initialShapeFillEnabled);
+    this.setPasteEnabled(false);
     this.setSaveStatus("saved");
   }
 
@@ -315,6 +374,10 @@ export class AnnotationToolbar {
     const isText = tool === "text";
     const isShape = tool === "shape";
     this.sizeControl.setDisabled(isHand || isSelection);
+    this.sizeButton.disabled = isHand || isSelection;
+    if (this.sizeButton.disabled) {
+      this.sizeMenu.classList.remove("is-open");
+    }
     this.sizeControl.setLabel(isEraser ? "橡皮" : isText ? "字号" : "粗细");
     this.sizeControl.setRange(
       isEraser ? 8 : isText ? 12 : 1,
@@ -370,8 +433,45 @@ export class AnnotationToolbar {
       button.setAttribute("aria-pressed", String(candidate === kind));
     }
     const shapeButton = this.toolButtons.get("shape");
-    shapeButton?.setAttribute("aria-label", `图形：${this.shapeKindLabel(kind)}`);
-    shapeButton?.setAttribute("title", `图形：${this.shapeKindLabel(kind)}`);
+    if (shapeButton) {
+      setIcon(shapeButton, this.shapeKindIcon(kind));
+      setControlTooltip(shapeButton, `图形：${this.shapeKindLabel(kind)}`);
+    }
+  }
+
+  setShapeLineStyle(style: ShapeLineStyle): void {
+    this.currentShapeLineStyle = style;
+    for (const [candidate, button] of this.shapeLineStyleButtons) {
+      button.classList.toggle("is-active", candidate === style);
+      button.setAttribute("aria-pressed", String(candidate === style));
+    }
+  }
+
+  setShapeArrow(position: "start" | "end", arrow: ShapeArrowHead): void {
+    if (position === "start") {
+      this.currentShapeStartArrow = arrow;
+    } else {
+      this.currentShapeEndArrow = arrow;
+    }
+    const button = position === "start"
+      ? this.shapeStartArrowButton
+      : this.shapeEndArrowButton;
+    setIcon(button, this.shapeArrowIcon(position, arrow));
+    setControlTooltip(
+      button,
+      `${position === "start" ? "起点" : "终点"}端点：${this.shapeArrowLabel(arrow)}`
+    );
+  }
+
+  setShapeFillEnabled(enabled: boolean): void {
+    this.shapeFillEnabled = enabled;
+    this.shapeFillButton.classList.toggle("is-active", enabled);
+    this.shapeFillButton.setAttribute("aria-pressed", String(enabled));
+    setControlTooltip(this.shapeFillButton, enabled ? "关闭图形填充" : "启用图形填充");
+  }
+
+  setPasteEnabled(enabled: boolean): void {
+    this.pasteButton.disabled = !enabled;
   }
 
   setWhiteboardActive(active: boolean): void {
@@ -413,8 +513,8 @@ export class AnnotationToolbar {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "hand-note-eraser-option";
-    button.setAttribute("aria-label", label);
     setIcon(button, icon);
+    setControlTooltip(button, label);
     const text = document.createElement("span");
     text.textContent = label;
     button.append(text);
@@ -436,8 +536,8 @@ export class AnnotationToolbar {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "hand-note-eraser-option";
-    button.setAttribute("aria-label", label);
     setIcon(button, icon);
+    setControlTooltip(button, label);
     const text = document.createElement("span");
     text.textContent = label;
     button.append(text);
@@ -459,8 +559,8 @@ export class AnnotationToolbar {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "hand-note-eraser-option";
-    button.setAttribute("aria-label", label);
     setIcon(button, icon);
+    setControlTooltip(button, label);
     const text = document.createElement("span");
     text.textContent = label;
     button.append(text);
@@ -475,6 +575,58 @@ export class AnnotationToolbar {
     return button;
   }
 
+  private createShapeLineStyleButton(
+    style: ShapeLineStyle,
+    label: string,
+    icon: string
+  ): HTMLButtonElement {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "hand-note-eraser-option";
+    setIcon(button, icon);
+    setControlTooltip(button, label);
+    const text = document.createElement("span");
+    text.textContent = label;
+    button.append(text);
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.options.onShapeLineStyleChange(style);
+      this.setShapeLineStyle(style);
+    });
+    this.shapeLineStyleButtons.set(style, button);
+    return button;
+  }
+
+  private createShapeArrowButton(position: "start" | "end"): HTMLButtonElement {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "hand-note-eraser-option";
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const current = position === "start"
+        ? this.currentShapeStartArrow
+        : this.currentShapeEndArrow;
+      const choices: ShapeArrowHead[] = ["none", "arrow", "circle", "diamond"];
+      const next = choices[(choices.indexOf(current) + 1) % choices.length];
+      this.options.onShapeArrowChange(position, next);
+      this.setShapeArrow(position, next);
+    });
+    return button;
+  }
+
+  private createShapeFillButton(): HTMLButtonElement {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "hand-note-eraser-option";
+    setIcon(button, "paint-bucket");
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.options.onShapeFillChange(!this.shapeFillEnabled);
+      this.setShapeFillEnabled(!this.shapeFillEnabled);
+    });
+    return button;
+  }
+
   private createExportButton(
     icon: string,
     label: string,
@@ -483,8 +635,8 @@ export class AnnotationToolbar {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "hand-note-eraser-option";
-    button.setAttribute("aria-label", label);
     setIcon(button, icon);
+    setControlTooltip(button, label);
     const text = document.createElement("span");
     text.textContent = label;
     button.append(text);
@@ -498,11 +650,50 @@ export class AnnotationToolbar {
 
   private shapeKindLabel(kind: ShapeKind): string {
     return {
-      line: "直线",
+      line: "直线与折线",
+      polyline: "折线",
       rectangle: "矩形",
       ellipse: "椭圆",
-      curve: "光滑曲线"
+      curve: "光滑曲线",
+      "connector-straight": "直线连接器",
+      "connector-elbow": "直角连接器",
+      "connector-curve": "曲线连接器"
     }[kind];
+  }
+
+  private shapeKindIcon(kind: ShapeKind): string {
+    return {
+      line: "minus",
+      polyline: "route",
+      rectangle: "square",
+      ellipse: "circle",
+      curve: "spline",
+      "connector-straight": "move-right",
+      "connector-elbow": "corner-down-right",
+      "connector-curve": "git-commit-horizontal"
+    }[kind];
+  }
+
+  private shapeArrowLabel(arrow: ShapeArrowHead): string {
+    return {
+      none: "无",
+      arrow: "箭头",
+      circle: "圆点",
+      diamond: "菱形"
+    }[arrow];
+  }
+
+  private shapeArrowIcon(position: "start" | "end", arrow: ShapeArrowHead): string {
+    if (arrow === "circle") {
+      return "circle";
+    }
+    if (arrow === "diamond") {
+      return "diamond";
+    }
+    if (arrow === "arrow") {
+      return position === "start" ? "arrow-left" : "arrow-right";
+    }
+    return position === "start" ? "move-left" : "move-right";
   }
 
   private buildColorMenu(): void {
@@ -512,7 +703,7 @@ export class AnnotationToolbar {
       button.className = "hand-note-palette-swatch";
       button.style.setProperty("--hand-note-swatch", color);
       button.style.backgroundColor = color;
-      button.setAttribute("aria-label", `选择颜色 ${color}`);
+      setControlTooltip(button, `选择颜色 ${color}`);
       button.addEventListener("click", (event) => {
         event.stopPropagation();
         this.updateActiveColorSlot(color);
@@ -563,5 +754,25 @@ export class AnnotationToolbar {
   private setToggle(button: HTMLButtonElement, enabled: boolean): void {
     button.classList.toggle("is-active", enabled);
     button.setAttribute("aria-pressed", String(enabled));
+  }
+
+  private toggleFloatingMenu(menu: HTMLElement, anchor: HTMLElement): void {
+    const opening = !menu.classList.contains("is-open");
+    this.element.querySelectorAll<HTMLElement>(".hand-note-eraser-menu.is-open")
+      .forEach((candidate) => candidate.classList.remove("is-open"));
+    if (!opening) {
+      return;
+    }
+    menu.classList.add("is-open");
+    const anchorRect = anchor.getBoundingClientRect();
+    const menuRect = menu.getBoundingClientRect();
+    const viewportWidth = window.visualViewport?.width ?? window.innerWidth;
+    const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+    const left = Math.max(8, Math.min(viewportWidth - menuRect.width - 8, anchorRect.left));
+    const top = anchorRect.bottom + menuRect.height + 8 <= viewportHeight
+      ? anchorRect.bottom + 6
+      : Math.max(8, anchorRect.top - menuRect.height - 6);
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
   }
 }

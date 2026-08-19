@@ -8,7 +8,25 @@ export type AnnotationTool =
   | "text"
   | "shape";
 
-export type ShapeKind = "line" | "rectangle" | "ellipse" | "curve";
+export type ShapeKind =
+  | "line"
+  | "polyline"
+  | "rectangle"
+  | "ellipse"
+  | "curve"
+  | "connector-straight"
+  | "connector-elbow"
+  | "connector-curve";
+
+export type ShapeLineStyle = "solid" | "dashed" | "dotted";
+export type ShapeArrowHead = "none" | "arrow" | "circle" | "diamond";
+export type ShapeConnectionEdge = "top" | "right" | "bottom" | "left";
+
+export interface ShapeConnection {
+  strokeId: string;
+  edge: ShapeConnectionEdge;
+  ratio: number;
+}
 
 export type EraserMode = "partial" | "stroke";
 export type SelectionMode = "all" | "rectangle" | "free";
@@ -36,6 +54,16 @@ export interface AnnotationStroke {
   points: StrokePoint[];
   pageIndex?: number;
   shape?: ShapeKind;
+  lineStyle?: ShapeLineStyle;
+  startArrow?: ShapeArrowHead;
+  endArrow?: ShapeArrowHead;
+  fillColor?: string;
+  fillOpacity?: number;
+  closed?: boolean;
+  locked?: boolean;
+  groupId?: string;
+  startConnection?: ShapeConnection;
+  endConnection?: ShapeConnection;
   text?: string;
   fontSize?: number;
 }

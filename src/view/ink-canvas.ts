@@ -6,12 +6,19 @@ import {
   AnnotationTool,
   EraserMode,
   SelectionMode,
+  ShapeArrowHead,
+  ShapeConnection,
   ShapeKind,
+  ShapeLineStyle,
   StrokePoint,
   generateId,
   getActiveLayer
 } from "../model/annotation";
-import { SelectionBounds, SelectionOverlay } from "./selection-overlay";
+import {
+  SelectionBounds,
+  SelectionOperation,
+  SelectionOverlay
+} from "./selection-overlay";
 import { drawFreehandStroke } from "./freehand-renderer";
 import { ShapeOverlay } from "./shape-overlay";
 
@@ -33,6 +40,10 @@ export interface InkCanvasOptions {
   getEraserMode: () => EraserMode;
   getSelectionMode?: () => SelectionMode;
   getShapeKind?: () => ShapeKind;
+  getShapeLineStyle?: () => ShapeLineStyle;
+  getShapeStartArrow?: () => ShapeArrowHead;
+  getShapeEndArrow?: () => ShapeArrowHead;
+  getShapeFillEnabled?: () => boolean;
   getPressureEnabled: () => boolean;
   onDocumentChange: (document: AnnotationDocument, renderCanvas?: boolean) => void;
   onInteraction?: (
@@ -42,6 +53,7 @@ export interface InkCanvasOptions {
   onFingerPan?: (deltaX: number, deltaY: number) => void;
   onPencilShortcut?: () => void;
   onRequestTool?: (tool: AnnotationTool) => void;
+  onClipboardChange?: (available: boolean) => void;
   pageIndex?: number;
 }
 
@@ -64,6 +76,8 @@ export class InkCanvas {
   private static readonly MAX_CANVAS_DIMENSION = 16_384;
   private static readonly MAX_LASSO_POINTS = 192;
   private static readonly PENCIL_COMPATIBILITY_GUARD_MS = 500;
+  private static readonly SHAPE_DWELL_MS = 420;
+  private static readonly instances = new Set<InkCanvas>();
   private static selectionClipboard: {
     strokes: AnnotationStroke[];
     bounds: SelectionBounds;
@@ -130,6 +144,7 @@ export class InkCanvas {
     layerId: string;
     strokeId: string;
     pointIndex: number;
+    historyDocument: AnnotationDocument;
     changed: boolean;
   } | null = null;
   private editingText: {
@@ -143,6 +158,23 @@ export class InkCanvas {
       fontSize?: number;
       points: StrokePoint[];
     };
+  } | null = null;
+  private shapeMoveState: {
+    pointerId: number;
+    layerId: string;
+    startX: number;
+    startY: number;
+    originals: Map<string, StrokePoint[]>;
+    movedIds: Set<string>;
+    historyDocument: AnnotationDocument;
+    changed: boolean;
+  } | null = null;
+  private polylineState: {
+    strokeId: string;
+    committed: StrokePoint[];
+    current: StrokePoint;
+    dwellAnchor: StrokePoint | null;
+    timer: number | null;
   } | null = null;
   private textEditorScrollLock: {
     target: HTMLElement | null;
@@ -163,6 +195,15 @@ export class InkCanvas {
     mode: "touch-pan" | "pen-text" | "pen-select";
     timer: number;
   } | null = null;
+  private canvasLongPress: {
+    pointerId: number;
+    startX: number;
+    startY: number;
+    point: StrokePoint;
+    timer: number;
+  } | null = null;
+  private readonly pastePrompt: HTMLButtonElement;
+  private pastePromptPoint: StrokePoint | null = null;
   private selectionTransformState: {
     pointerId: number;
     handle: string;
@@ -171,6 +212,7 @@ export class InkCanvas {
     bounds: SelectionBounds;
     points: Map<string, StrokePoint[]>;
     textSizes: Map<string, { fontSize: number; size: number }>;
+    historyDocument: AnnotationDocument;
     startAngle: number;
     changed: boolean;
   } | null = null;
@@ -220,17 +262,31 @@ export class InkCanvas {
       () => this.pasteSelection(),
       (color) => this.setSelectionColor(color),
       () => void this.exportSelectionScreenshot(),
-      (event, handle) => this.beginSelectionTransform(event, handle)
+      (event, handle) => this.beginSelectionTransform(event, handle),
+      (operation) => this.applySelectionOperation(operation)
     );
     this.selectionOverlay.setPasteEnabled(InkCanvas.selectionClipboard !== null);
     this.selectionLayer = this.selectionOverlay.element;
     this.selectionOutline = this.selectionOverlay.outline;
     this.selectionMenu = this.selectionOverlay.menu;
     this.selectionTransform = this.selectionOverlay.transformBox;
-    this.shapeOverlay = new ShapeOverlay((event, pointIndex) =>
-      this.beginShapeAnchorDrag(event, pointIndex)
+    this.shapeOverlay = new ShapeOverlay(
+      (event, pointIndex) => this.beginShapeAnchorDrag(event, pointIndex),
+      (segmentIndex) => this.insertShapeControlPoint(segmentIndex),
+      (pointIndex) => this.deleteShapeControlPoint(pointIndex)
     );
     this.shapeControls = this.shapeOverlay.element;
+    this.pastePrompt = document.createElement("button");
+    this.pastePrompt.type = "button";
+    this.pastePrompt.className = "hand-note-canvas-paste-prompt";
+    setIcon(this.pastePrompt, "clipboard-paste");
+    this.pastePrompt.append(document.createTextNode("粘贴"));
+    this.pastePrompt.addEventListener("click", () => {
+      const point = this.pastePromptPoint;
+      this.hidePastePrompt();
+      this.pasteClipboard(point ?? undefined);
+    });
+    document.body.append(this.pastePrompt);
     this.textEditorPortal = document.createElement("div");
     this.textEditorPortal.className = "hand-note-text-editor-portal";
     const textEditorHeader = document.createElement("div");
@@ -298,6 +354,12 @@ export class InkCanvas {
     window.addEventListener("dblclick", this.handleCompatibilityMouseCapture, true);
     window.addEventListener("contextmenu", this.handleCompatibilityMouseCapture, true);
     this.updateInputMode();
+    InkCanvas.instances.add(this);
+    window.setTimeout(() => {
+      if (InkCanvas.instances.has(this)) {
+        this.options.onClipboardChange?.(InkCanvas.selectionClipboard !== null);
+      }
+    }, 0);
 
     if (typeof ResizeObserver !== "undefined") {
       this.observer = new ResizeObserver(() => this.scheduleResizeRender());
@@ -332,12 +394,17 @@ export class InkCanvas {
     window.removeEventListener("contextmenu", this.handleCompatibilityMouseCapture, true);
     this.observer?.disconnect();
     this.cancelTextLongPress();
+    this.cancelCanvasLongPress();
+    this.clearPolylineState();
+    this.finishShapeMove(false);
+    InkCanvas.instances.delete(this);
     this.unlockTextEditorScroll();
     window.visualViewport?.removeEventListener("resize", this.positionTextEditor);
     window.visualViewport?.removeEventListener("scroll", this.positionTextEditor);
     window.removeEventListener("resize", this.positionTextEditor);
     this.selectionOverlay.destroy();
     this.shapeControls.remove();
+    this.pastePrompt.remove();
     this.textEditorPortal.remove();
     this.liveCanvas.remove();
     if (this.interactionFrame !== null) {
@@ -431,6 +498,17 @@ export class InkCanvas {
       this.activeRect = rect;
       this.activeViewport = this.currentViewport(rect);
     }
+    const viewport = this.currentViewport(rect);
+    if (this.selectionBounds && this.lassoPoints.length > 2) {
+      this.selectionOverlay.setSelection(
+        this.lassoPoints,
+        this.selectionBounds,
+        viewport,
+        rect
+      );
+    }
+    this.refreshShapeOverlay();
+    this.positionTextEditor();
   }
 
   isInteracting(): boolean {
@@ -460,10 +538,18 @@ export class InkCanvas {
       this.cancelSelection();
       return;
     }
+    if (layer.strokes.some(
+      (stroke) => this.selectedStrokeIds.has(stroke.id) && stroke.locked
+    )) {
+      new Notice("所选内容包含锁定对象");
+      return;
+    }
     this.pushHistory(document);
+    const deletedIds = new Set(this.selectedStrokeIds);
     layer.strokes = layer.strokes.filter(
       (stroke) => !this.selectedStrokeIds.has(stroke.id)
     );
+    this.detachConnectionsToDeleted(document, deletedIds);
     this.cancelSelection();
     this.options.onInteraction?.("selection-delete");
     this.options.onDocumentChange(document);
@@ -478,13 +564,31 @@ export class InkCanvas {
     if (!layer) {
       return;
     }
+    if (layer.strokes.some(
+      (stroke) => this.selectedStrokeIds.has(stroke.id) && stroke.locked
+    )) {
+      new Notice("所选内容包含锁定对象");
+      return;
+    }
+    const selected = layer.strokes.filter((stroke) => this.selectedStrokeIds.has(stroke.id));
+    const viewport = this.currentViewport(this.canvas.getBoundingClientRect());
+    const bounds = this.selectionBounds ?? selected.reduce<SelectionBounds | null>(
+      (current, stroke) => this.unionBounds(current, this.getStrokeBounds(stroke)),
+      null
+    );
+    if (!bounds) {
+      return;
+    }
+    const requestedX = 12 / Math.max(1, viewport.documentWidth);
+    const requestedY = 12 / Math.max(1, viewport.documentHeight);
+    const dx = Math.max(-bounds.minX, Math.min(1 - bounds.maxX, requestedX));
+    const dy = Math.max(-bounds.minY, Math.min(1 - bounds.maxY, requestedY));
     this.pushHistory(document);
-    const duplicates = layer.strokes
-      .filter((stroke) => this.selectedStrokeIds.has(stroke.id))
-      .map((stroke) => this.cloneStroke(stroke));
+    const duplicates = this.cloneStrokeBatch(selected, dx, dy, this.options.pageIndex);
     layer.strokes.push(...duplicates);
     this.selectedStrokeIds = new Set(duplicates.map((stroke) => stroke.id));
     this.refreshSelectionBounds();
+    this.render();
     this.options.onDocumentChange(document, false);
   }
 
@@ -494,22 +598,39 @@ export class InkCanvas {
       return;
     }
     InkCanvas.selectionClipboard = snapshot;
-    this.selectionOverlay.setPasteEnabled(true);
+    InkCanvas.notifyClipboardChange();
     new Notice("已拷贝到插件剪贴板");
   }
 
   private cutSelection(): void {
+    const layer = this.options
+      .getDocument()
+      .layers.find((item) => item.id === this.selectedLayerId);
+    if (layer?.strokes.some(
+      (stroke) => this.selectedStrokeIds.has(stroke.id) && stroke.locked
+    )) {
+      new Notice("请先解锁所选内容");
+      return;
+    }
     const snapshot = this.selectionSnapshot();
     if (!snapshot) {
       return;
     }
     InkCanvas.selectionClipboard = snapshot;
-    this.selectionOverlay.setPasteEnabled(true);
+    InkCanvas.notifyClipboardChange();
     this.deleteSelection();
     new Notice("已剪切到插件剪贴板");
   }
 
   private pasteSelection(): void {
+    this.pasteClipboard();
+  }
+
+  pasteClipboardAtViewportCenter(): void {
+    this.pasteClipboard();
+  }
+
+  private pasteClipboard(target?: StrokePoint): void {
     const clipboard = InkCanvas.selectionClipboard;
     if (!clipboard || clipboard.strokes.length === 0) {
       return;
@@ -517,8 +638,10 @@ export class InkCanvas {
     const document = this.options.getDocument();
     const layer = getActiveLayer(document);
     const viewport = this.currentViewport(this.canvas.getBoundingClientRect());
-    const targetX = (viewport.offsetX + viewport.width / 2) / Math.max(1, viewport.documentWidth);
-    const targetY = (viewport.offsetY + viewport.height / 2) / Math.max(1, viewport.documentHeight);
+    const targetX = target?.x ??
+      (viewport.offsetX + viewport.width / 2) / Math.max(1, viewport.documentWidth);
+    const targetY = target?.y ??
+      (viewport.offsetY + viewport.height / 2) / Math.max(1, viewport.documentHeight);
     const sourceX = (clipboard.bounds.minX + clipboard.bounds.maxX) / 2;
     const sourceY = (clipboard.bounds.minY + clipboard.bounds.maxY) / 2;
     const dx = Math.max(
@@ -531,15 +654,12 @@ export class InkCanvas {
     );
 
     this.pushHistory(document);
-    const pasted = clipboard.strokes.map((stroke) => ({
-      ...this.cloneStroke(stroke),
-      pageIndex: this.options.pageIndex,
-      points: stroke.points.map((point) => ({
-        ...point,
-        x: point.x + dx,
-        y: point.y + dy
-      }))
-    }));
+    const pasted = this.cloneStrokeBatch(
+      clipboard.strokes,
+      dx,
+      dy,
+      this.options.pageIndex
+    );
     layer.strokes.push(...pasted);
     this.cancelSelection();
     this.selectedLayerId = layer.id;
@@ -547,6 +667,7 @@ export class InkCanvas {
     this.refreshSelectionBounds();
     this.options.onActivate?.();
     this.options.onRequestTool?.("select");
+    this.render();
     this.options.onDocumentChange(document, false);
   }
 
@@ -560,15 +681,164 @@ export class InkCanvas {
       return;
     }
     const selected = layer.strokes.filter((stroke) => this.selectedStrokeIds.has(stroke.id));
+    if (selected.some((stroke) => stroke.locked)) {
+      new Notice("请先解锁所选内容");
+      return;
+    }
     if (selected.length === 0 || selected.every((stroke) => stroke.color === color)) {
       return;
     }
     this.pushHistory(document);
     for (const stroke of selected) {
       stroke.color = color;
+      if (stroke.fillColor) {
+        stroke.fillColor = color;
+      }
     }
     this.render();
     this.options.onDocumentChange(document, false);
+  }
+
+  private applySelectionOperation(operation: SelectionOperation): void {
+    const document = this.options.getDocument();
+    const layer = document.layers.find((item) => item.id === this.selectedLayerId);
+    if (!layer) {
+      return;
+    }
+    const selected = layer.strokes.filter((stroke) => this.selectedStrokeIds.has(stroke.id));
+    if (selected.length === 0) {
+      return;
+    }
+    const editable = operation === "unlock"
+      ? selected
+      : selected.filter((stroke) => !stroke.locked);
+    if (editable.length === 0) {
+      new Notice("所选内容已锁定");
+      return;
+    }
+
+    let changed = false;
+    const movedIds = new Set<string>();
+    const begin = (): void => {
+      if (!changed) {
+        this.pushHistory(document);
+        changed = true;
+      }
+    };
+    if (operation === "lock" || operation === "unlock") {
+      const locked = operation === "lock";
+      if (editable.some((stroke) => Boolean(stroke.locked) !== locked)) {
+        begin();
+        editable.forEach((stroke) => { stroke.locked = locked || undefined; });
+      }
+    } else if (operation === "group") {
+      if (editable.length >= 2) {
+        begin();
+        const groupId = generateId();
+        editable.forEach((stroke) => { stroke.groupId = groupId; });
+      }
+    } else if (operation === "ungroup") {
+      if (editable.some((stroke) => stroke.groupId)) {
+        begin();
+        editable.forEach((stroke) => { stroke.groupId = undefined; });
+      }
+    } else if (operation === "front" || operation === "back") {
+      begin();
+      const selectedIds = new Set(editable.map((stroke) => stroke.id));
+      const stationary = layer.strokes.filter((stroke) => !selectedIds.has(stroke.id));
+      const ordered = layer.strokes.filter((stroke) => selectedIds.has(stroke.id));
+      layer.strokes = operation === "front"
+        ? [...stationary, ...ordered]
+        : [...ordered, ...stationary];
+    } else {
+      const bounds = editable.map((stroke) => ({
+        stroke,
+        bounds: this.getStrokeBounds(stroke)
+      }));
+      const selection = bounds.reduce<SelectionBounds | null>(
+        (current, item) => this.unionBounds(current, item.bounds),
+        null
+      );
+      if (!selection) {
+        return;
+      }
+      const move = (stroke: AnnotationStroke, dx: number, dy: number): void => {
+        if (Math.abs(dx) < 1e-8 && Math.abs(dy) < 1e-8) {
+          return;
+        }
+        begin();
+        stroke.points = stroke.points.map((point) => ({
+          ...point,
+          x: Math.max(0, Math.min(1, point.x + dx)),
+          y: Math.max(0, Math.min(1, point.y + dy))
+        }));
+        this.strokeBounds.delete(stroke);
+        movedIds.add(stroke.id);
+      };
+      for (const item of bounds) {
+        if (operation === "align-left") {
+          move(item.stroke, selection.minX - item.bounds.minX, 0);
+        } else if (operation === "align-center") {
+          move(item.stroke, (selection.minX + selection.maxX - item.bounds.minX - item.bounds.maxX) / 2, 0);
+        } else if (operation === "align-right") {
+          move(item.stroke, selection.maxX - item.bounds.maxX, 0);
+        } else if (operation === "align-top") {
+          move(item.stroke, 0, selection.minY - item.bounds.minY);
+        } else if (operation === "align-middle") {
+          move(item.stroke, 0, (selection.minY + selection.maxY - item.bounds.minY - item.bounds.maxY) / 2);
+        } else if (operation === "align-bottom") {
+          move(item.stroke, 0, selection.maxY - item.bounds.maxY);
+        }
+      }
+      if (operation === "distribute-horizontal" && bounds.length >= 3) {
+        const ordered = bounds.slice().sort((a, b) =>
+          (a.bounds.minX + a.bounds.maxX) - (b.bounds.minX + b.bounds.maxX)
+        );
+        const first = (ordered[0].bounds.minX + ordered[0].bounds.maxX) / 2;
+        const last = (ordered[ordered.length - 1].bounds.minX + ordered[ordered.length - 1].bounds.maxX) / 2;
+        ordered.slice(1, -1).forEach((item, index) => {
+          const target = first + ((last - first) * (index + 1)) / (ordered.length - 1);
+          move(item.stroke, target - (item.bounds.minX + item.bounds.maxX) / 2, 0);
+        });
+      } else if (operation === "distribute-vertical" && bounds.length >= 3) {
+        const ordered = bounds.slice().sort((a, b) =>
+          (a.bounds.minY + a.bounds.maxY) - (b.bounds.minY + b.bounds.maxY)
+        );
+        const first = (ordered[0].bounds.minY + ordered[0].bounds.maxY) / 2;
+        const last = (ordered[ordered.length - 1].bounds.minY + ordered[ordered.length - 1].bounds.maxY) / 2;
+        ordered.slice(1, -1).forEach((item, index) => {
+          const target = first + ((last - first) * (index + 1)) / (ordered.length - 1);
+          move(item.stroke, 0, target - (item.bounds.minY + item.bounds.maxY) / 2);
+        });
+      }
+    }
+
+    if (!changed) {
+      return;
+    }
+    if (movedIds.size > 0) {
+      this.detachExternalConnectorLinks(editable, new Set(editable.map((stroke) => stroke.id)));
+      this.updateAttachedConnectors(document, movedIds);
+    }
+    this.refreshSelectionBounds();
+    this.render();
+    this.options.onDocumentChange(document, false);
+  }
+
+  private detachConnectionsToDeleted(
+    document: AnnotationDocument,
+    deletedIds: Set<string>
+  ): void {
+    for (const layer of document.layers) {
+      for (const stroke of layer.strokes) {
+        if (stroke.startConnection && deletedIds.has(stroke.startConnection.strokeId)) {
+          stroke.startConnection = undefined;
+        }
+        if (stroke.endConnection && deletedIds.has(stroke.endConnection.strokeId)) {
+          stroke.endConnection = undefined;
+        }
+      }
+    }
   }
 
   private selectionSnapshot(): { strokes: AnnotationStroke[]; bounds: SelectionBounds } | null {
@@ -593,8 +863,53 @@ export class InkCanvas {
     return {
       ...stroke,
       id: generateNewId ? generateId() : stroke.id,
-      points: stroke.points.map((point) => ({ ...point }))
+      points: stroke.points.map((point) => ({ ...point })),
+      startConnection: stroke.startConnection ? { ...stroke.startConnection } : undefined,
+      endConnection: stroke.endConnection ? { ...stroke.endConnection } : undefined
     };
+  }
+
+  private cloneStrokeBatch(
+    strokes: AnnotationStroke[],
+    dx: number,
+    dy: number,
+    pageIndex: number | undefined
+  ): AnnotationStroke[] {
+    const ids = new Set(strokes.map((stroke) => stroke.id));
+    const idMap = new Map(strokes.map((stroke) => [stroke.id, generateId()]));
+    const groupMap = new Map<string, string>();
+    for (const stroke of strokes) {
+      if (stroke.groupId && !groupMap.has(stroke.groupId)) {
+        groupMap.set(stroke.groupId, generateId());
+      }
+    }
+    const remapConnection = (connection?: ShapeConnection): ShapeConnection | undefined => {
+      if (!connection || !ids.has(connection.strokeId)) {
+        return undefined;
+      }
+      return { ...connection, strokeId: idMap.get(connection.strokeId) ?? connection.strokeId };
+    };
+    return strokes.map((stroke) => ({
+      ...this.cloneStroke(stroke, false),
+      id: idMap.get(stroke.id) ?? generateId(),
+      pageIndex,
+      groupId: stroke.groupId ? groupMap.get(stroke.groupId) : undefined,
+      startConnection: remapConnection(stroke.startConnection),
+      endConnection: remapConnection(stroke.endConnection),
+      points: stroke.points.map((point) => ({
+        ...point,
+        x: Math.max(0, Math.min(1, point.x + dx)),
+        y: Math.max(0, Math.min(1, point.y + dy))
+      }))
+    }));
+  }
+
+  private static notifyClipboardChange(): void {
+    const available = InkCanvas.selectionClipboard !== null;
+    for (const canvas of InkCanvas.instances) {
+      canvas.selectionOverlay.setPasteEnabled(available);
+      canvas.options.onClipboardChange?.(available);
+    }
   }
 
   setSelectedTextColor(color: string): boolean {
@@ -608,23 +923,94 @@ export class InkCanvas {
     const targetIds = editing
       ? new Set([editing.strokeId])
       : this.selectedStrokeIds;
-    const textStrokes = layer.strokes.filter(
-      (stroke) => targetIds.has(stroke.id) && stroke.tool === "text"
+    const objectStrokes = layer.strokes.filter(
+      (stroke) => targetIds.has(stroke.id) && !stroke.locked && (stroke.tool === "text" || stroke.tool === "shape")
     );
-    if (textStrokes.length === 0 || textStrokes.every((stroke) => stroke.color === color)) {
+    if (objectStrokes.length === 0 || objectStrokes.every(
+      (stroke) => stroke.color === color && (!stroke.fillColor || stroke.fillColor === color)
+    )) {
       return false;
     }
     if (!editing) {
       this.pushHistory(document);
     }
-    for (const stroke of textStrokes) {
+    for (const stroke of objectStrokes) {
       stroke.color = color;
+      if (stroke.fillColor) {
+        stroke.fillColor = color;
+      }
     }
     if (editing) {
       this.textEditor.style.color = color;
     }
     this.options.onDocumentChange(document, false);
     this.render();
+    return true;
+  }
+
+  setSelectedShapeLineStyle(style: ShapeLineStyle): boolean {
+    return this.updateSelectedShapes((stroke) => {
+      if (stroke.lineStyle === style) {
+        return false;
+      }
+      stroke.lineStyle = style;
+      return true;
+    });
+  }
+
+  setSelectedShapeArrow(position: "start" | "end", arrow: ShapeArrowHead): boolean {
+    return this.updateSelectedShapes((stroke) => {
+      if (position === "start") {
+        if (stroke.startArrow === arrow) {
+          return false;
+        }
+        stroke.startArrow = arrow;
+      } else {
+        if (stroke.endArrow === arrow) {
+          return false;
+        }
+        stroke.endArrow = arrow;
+      }
+      return true;
+    });
+  }
+
+  setSelectedShapeFill(enabled: boolean): boolean {
+    return this.updateSelectedShapes((stroke) => {
+      if (enabled && !stroke.fillColor) {
+        stroke.fillColor = this.options.getColor();
+        stroke.fillOpacity = 0.14;
+        return true;
+      }
+      if (!enabled && stroke.fillColor) {
+        stroke.fillColor = undefined;
+        stroke.fillOpacity = undefined;
+        return true;
+      }
+      return false;
+    });
+  }
+
+  private updateSelectedShapes(change: (stroke: AnnotationStroke) => boolean): boolean {
+    const document = this.options.getDocument();
+    const layer = document.layers.find((item) => item.id === this.selectedLayerId);
+    const shapes = layer?.strokes.filter(
+      (stroke) => this.selectedStrokeIds.has(stroke.id) && stroke.tool === "shape" && !stroke.locked
+    ) ?? [];
+    if (shapes.length === 0) {
+      return false;
+    }
+    const snapshot = this.snapshotDocument(document);
+    let changed = false;
+    for (const stroke of shapes) {
+      changed = change(stroke) || changed;
+    }
+    if (!changed) {
+      return false;
+    }
+    this.pushHistoryEntry({ kind: "snapshot", document: snapshot });
+    this.render();
+    this.options.onDocumentChange(document, false);
     return true;
   }
 
@@ -753,6 +1139,12 @@ export class InkCanvas {
     if (!layer) {
       return;
     }
+    if (layer.strokes.some(
+      (stroke) => this.selectedStrokeIds.has(stroke.id) && stroke.locked
+    )) {
+      new Notice("所选内容包含锁定对象");
+      return;
+    }
     const points = new Map<string, StrokePoint[]>();
     const textSizes = new Map<string, { fontSize: number; size: number }>();
     for (const stroke of layer.strokes) {
@@ -778,6 +1170,7 @@ export class InkCanvas {
       bounds: { ...this.selectionBounds },
       points,
       textSizes,
+      historyDocument: this.snapshotDocument(this.options.getDocument()),
       startAngle: this.selectionPointerAngle(event, this.selectionBounds),
       changed: false
     };
@@ -809,7 +1202,6 @@ export class InkCanvas {
       return;
     }
     if (!state.changed) {
-      this.pushHistory(this.options.getDocument());
       state.changed = true;
     }
     const layer = this.options
@@ -817,6 +1209,10 @@ export class InkCanvas {
       .layers.find((item) => item.id === this.selectedLayerId);
     if (!layer) {
       return;
+    }
+    if (state.changed) {
+      const selected = layer.strokes.filter((stroke) => this.selectedStrokeIds.has(stroke.id));
+      this.detachExternalConnectorLinks(selected, new Set(this.selectedStrokeIds));
     }
     if (state.handle === "rotate") {
       const centerX = ((state.bounds.minX + state.bounds.maxX) / 2) * viewport.documentWidth;
@@ -839,6 +1235,7 @@ export class InkCanvas {
         });
         this.strokeBounds.delete(stroke);
       }
+      this.updateAttachedConnectors(this.options.getDocument(), new Set(this.selectedStrokeIds));
       this.refreshSelectionBounds();
       this.render();
       return;
@@ -871,6 +1268,7 @@ export class InkCanvas {
     }
     this.selectionBounds = next;
     this.lassoPoints = this.rectanglePoints(next);
+    this.updateAttachedConnectors(this.options.getDocument(), new Set(this.selectedStrokeIds));
     this.render();
     this.selectionOverlay.setSelection(
       this.lassoPoints,
@@ -901,12 +1299,14 @@ export class InkCanvas {
   };
 
   private endSelectionTransform(): void {
-    const changed = this.selectionTransformState?.changed ?? false;
+    const state = this.selectionTransformState;
+    const changed = state?.changed ?? false;
     this.selectionTransformState = null;
     window.removeEventListener("pointermove", this.handleSelectionTransformMove);
     window.removeEventListener("pointerup", this.handleSelectionTransformEnd);
     window.removeEventListener("pointercancel", this.handleSelectionTransformEnd);
     if (changed) {
+      this.pushHistoryEntry({ kind: "snapshot", document: state?.historyDocument as AnnotationDocument });
       this.options.onDocumentChange(this.options.getDocument(), false);
     }
   }
@@ -1049,6 +1449,65 @@ export class InkCanvas {
     return true;
   }
 
+  private startCanvasLongPress(event: PointerEvent, point: StrokePoint): void {
+    this.cancelCanvasLongPress();
+    const timer = window.setTimeout(() => {
+      const pending = this.canvasLongPress;
+      if (!pending || pending.pointerId !== event.pointerId) {
+        return;
+      }
+      this.canvasLongPress = null;
+      this.showPastePrompt(event.clientX, event.clientY, pending.point);
+      const pointerId = this.activePointerId;
+      this.resetPointerState();
+      if (pointerId !== null && this.canvas.hasPointerCapture(pointerId)) {
+        this.canvas.releasePointerCapture(pointerId);
+      }
+      this.resumePendingDocumentPublish();
+    }, InkCanvas.SHAPE_DWELL_MS);
+    this.canvasLongPress = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      point: { ...point },
+      timer
+    };
+  }
+
+  private cancelCanvasLongPress(): void {
+    if (!this.canvasLongPress) {
+      return;
+    }
+    window.clearTimeout(this.canvasLongPress.timer);
+    this.canvasLongPress = null;
+  }
+
+  private canvasLongPressMoved(event: PointerEvent): boolean {
+    const pending = this.canvasLongPress;
+    if (!pending || pending.pointerId !== event.pointerId) {
+      return false;
+    }
+    if (Math.hypot(event.clientX - pending.startX, event.clientY - pending.startY) <= 8) {
+      return false;
+    }
+    this.cancelCanvasLongPress();
+    return true;
+  }
+
+  private showPastePrompt(clientX: number, clientY: number, point: StrokePoint): void {
+    this.pastePromptPoint = { ...point };
+    this.pastePrompt.classList.add("is-visible");
+    const width = 88;
+    const height = 40;
+    this.pastePrompt.style.left = `${Math.max(8, Math.min(window.innerWidth - width - 8, clientX - width / 2))}px`;
+    this.pastePrompt.style.top = `${Math.max(8, Math.min(window.innerHeight - height - 8, clientY - height - 10))}px`;
+  }
+
+  private hidePastePrompt(): void {
+    this.pastePromptPoint = null;
+    this.pastePrompt.classList.remove("is-visible");
+  }
+
   selectAll(): void {
     const layer = getActiveLayer(this.options.getDocument());
     const strokes = layer.strokes.filter(
@@ -1176,6 +1635,7 @@ export class InkCanvas {
 
     this.pushHistory(document);
     this.cancelSelection();
+    this.detachConnectionsToDeleted(document, new Set(layer.strokes.map((stroke) => stroke.id)));
     layer.strokes = [];
     this.options.onDocumentChange(document);
   }
@@ -1379,8 +1839,15 @@ export class InkCanvas {
     context.lineWidth = stroke.size;
     context.lineCap = "round";
     context.lineJoin = "round";
+    context.setLineDash(
+      stroke.lineStyle === "dashed"
+        ? [Math.max(6, stroke.size * 3), Math.max(4, stroke.size * 2)]
+        : stroke.lineStyle === "dotted"
+          ? [Math.max(1, stroke.size * 0.4), Math.max(4, stroke.size * 2)]
+          : []
+    );
     context.beginPath();
-    if (stroke.shape === "curve" && points.length >= 4) {
+    if ((stroke.shape === "curve" || stroke.shape === "connector-curve") && points.length >= 4) {
       context.moveTo(points[0].x, points[0].y);
       context.bezierCurveTo(
         points[1].x,
@@ -1415,9 +1882,85 @@ export class InkCanvas {
       context.closePath();
     } else {
       context.moveTo(points[0].x, points[0].y);
-      context.lineTo(points[points.length - 1].x, points[points.length - 1].y);
+      for (let index = 1; index < points.length; index += 1) {
+        context.lineTo(points[index].x, points[index].y);
+      }
+      if (stroke.closed) {
+        context.closePath();
+      }
+    }
+    if (stroke.fillColor && (stroke.closed || stroke.shape === "rectangle" || stroke.shape === "ellipse")) {
+      context.save();
+      context.globalAlpha *= stroke.fillOpacity ?? 0.14;
+      context.fillStyle = stroke.fillColor;
+      context.fill();
+      context.restore();
     }
     context.stroke();
+    context.setLineDash([]);
+    const firstAdjacent = (stroke.shape === "curve" || stroke.shape === "connector-curve") && points[1]
+      ? points[1]
+      : points[1];
+    const lastAdjacent = (stroke.shape === "curve" || stroke.shape === "connector-curve") && points.length >= 4
+      ? points[points.length - 2]
+      : points[points.length - 2];
+    const closedShape = stroke.closed || stroke.shape === "rectangle" || stroke.shape === "ellipse";
+    if (!closedShape && firstAdjacent) {
+      this.drawShapeArrow(context, points[0], firstAdjacent, stroke.startArrow ?? "none", stroke.size);
+    }
+    if (!closedShape && lastAdjacent) {
+      this.drawShapeArrow(
+        context,
+        points[points.length - 1],
+        lastAdjacent,
+        stroke.endArrow ?? "none",
+        stroke.size
+      );
+    }
+  }
+
+  private drawShapeArrow(
+    context: CanvasRenderingContext2D,
+    tip: { x: number; y: number },
+    adjacent: { x: number; y: number },
+    arrow: ShapeArrowHead,
+    strokeWidth: number
+  ): void {
+    if (arrow === "none") {
+      return;
+    }
+    const angle = Math.atan2(tip.y - adjacent.y, tip.x - adjacent.x);
+    const length = Math.max(7, Math.min(13, 7 + strokeWidth));
+    context.save();
+    context.setLineDash([]);
+    context.fillStyle = context.strokeStyle;
+    if (arrow === "circle") {
+      context.beginPath();
+      context.arc(tip.x, tip.y, Math.max(2.5, Math.min(5, strokeWidth + 2)), 0, Math.PI * 2);
+      context.fill();
+    } else if (arrow === "diamond") {
+      const half = length * 0.42;
+      const backX = tip.x - Math.cos(angle) * length;
+      const backY = tip.y - Math.sin(angle) * length;
+      const middleX = (tip.x + backX) / 2;
+      const middleY = (tip.y + backY) / 2;
+      context.beginPath();
+      context.moveTo(tip.x, tip.y);
+      context.lineTo(middleX + Math.cos(angle + Math.PI / 2) * half, middleY + Math.sin(angle + Math.PI / 2) * half);
+      context.lineTo(backX, backY);
+      context.lineTo(middleX + Math.cos(angle - Math.PI / 2) * half, middleY + Math.sin(angle - Math.PI / 2) * half);
+      context.closePath();
+      context.fill();
+    } else {
+      const spread = Math.PI / 7;
+      context.beginPath();
+      context.moveTo(tip.x, tip.y);
+      context.lineTo(tip.x - Math.cos(angle - spread) * length, tip.y - Math.sin(angle - spread) * length);
+      context.lineTo(tip.x - Math.cos(angle + spread) * length, tip.y - Math.sin(angle + spread) * length);
+      context.closePath();
+      context.fill();
+    }
+    context.restore();
   }
 
   private drawTextStroke(
@@ -1511,6 +2054,7 @@ export class InkCanvas {
     tool: "shape" | "text"
   ): void {
     const viewport = this.activeViewport ?? this.currentViewport(this.canvas.getBoundingClientRect());
+    const shapeKind = this.options.getShapeKind?.() ?? "rectangle";
     const end = tool === "text"
       ? this.defaultTextEnd(point, viewport)
       : { ...point };
@@ -1526,7 +2070,14 @@ export class InkCanvas {
           ? this.shapePoints(point, end, this.options.getShapeKind?.() ?? "rectangle")
           : this.rectanglePoints(this.boundsForPoints([point, end])),
       pageIndex: this.options.pageIndex,
-      shape: tool === "shape" ? this.options.getShapeKind?.() ?? "rectangle" : undefined,
+      shape: tool === "shape" ? shapeKind : undefined,
+      lineStyle: tool === "shape" ? this.options.getShapeLineStyle?.() ?? "solid" : undefined,
+      startArrow: tool === "shape" ? this.options.getShapeStartArrow?.() ?? "none" : undefined,
+      endArrow: tool === "shape" ? this.options.getShapeEndArrow?.() ?? "none" : undefined,
+      fillColor: tool === "shape" && this.options.getShapeFillEnabled?.()
+        ? this.options.getColor()
+        : undefined,
+      fillOpacity: tool === "shape" && this.options.getShapeFillEnabled?.() ? 0.14 : undefined,
       text: tool === "text" ? "" : undefined,
       fontSize: tool === "text" ? this.options.getSize() : undefined
     };
@@ -1534,6 +2085,12 @@ export class InkCanvas {
     this.activeStrokeLayerOpacity = layer.opacity;
     this.activeStrokeDocument = this.options.getDocument();
     layer.strokes.push(this.activeStroke);
+    if (tool === "shape" && shapeKind === "line") {
+      this.startPolylineState(this.activeStroke, point);
+    }
+    if (tool === "shape" && this.isConnector(this.activeStroke)) {
+      this.attachConnectorEndpoint(layer, this.activeStroke, "start");
+    }
     this.options.onInteraction?.("stroke-start");
     this.render();
   }
@@ -1549,7 +2106,17 @@ export class InkCanvas {
       return;
     }
     if (stroke.tool === "shape") {
-      stroke.points = this.shapePoints(start, point, stroke.shape ?? "rectangle");
+      if (this.polylineState?.strokeId === stroke.id) {
+        this.updatePolylineShape(stroke, point);
+      } else {
+        stroke.points = this.shapePoints(start, point, stroke.shape ?? "rectangle");
+        const layer = this.activeStrokeLayerId
+          ? this.options.getDocument().layers.find((item) => item.id === this.activeStrokeLayerId)
+          : undefined;
+        if (layer && this.isConnector(stroke)) {
+          this.attachConnectorEndpoint(layer, stroke, "end");
+        }
+      }
     } else if (stroke.tool === "text") {
       const dx = Math.abs(point.x - start.x) * this.activeViewport.documentWidth;
       const dy = Math.abs(point.y - start.y) * this.activeViewport.documentHeight;
@@ -1568,7 +2135,7 @@ export class InkCanvas {
     kind: ShapeKind
   ): StrokePoint[] {
     const point = (x: number, y: number): StrokePoint => ({ x, y, pressure: 0.5 });
-    if (kind === "line") {
+    if (kind === "line" || kind === "polyline" || kind === "connector-straight") {
       return [{ ...start }, { ...end }];
     }
     if (kind === "rectangle") {
@@ -1593,6 +2160,15 @@ export class InkCanvas {
         point(left, centerY)
       ];
     }
+    if (kind === "connector-elbow") {
+      const middleX = (start.x + end.x) / 2;
+      return [
+        { ...start },
+        point(middleX, start.y),
+        point(middleX, end.y),
+        { ...end }
+      ];
+    }
     const dx = end.x - start.x;
     const dy = end.y - start.y;
     return [
@@ -1601,6 +2177,269 @@ export class InkCanvas {
       point(start.x + (dx * 2) / 3, end.y - dy * 0.08),
       { ...end }
     ];
+  }
+
+  private startPolylineState(stroke: AnnotationStroke, start: StrokePoint): void {
+    this.clearPolylineState();
+    this.polylineState = {
+      strokeId: stroke.id,
+      committed: [{ ...start }],
+      current: { ...start },
+      dwellAnchor: null,
+      timer: null
+    };
+  }
+
+  private updatePolylineShape(stroke: AnnotationStroke, current: StrokePoint): void {
+    const state = this.polylineState;
+    const viewport = this.activeViewport;
+    if (!state || state.strokeId !== stroke.id || !viewport) {
+      stroke.points = this.shapePoints(stroke.points[0], current, "line");
+      return;
+    }
+    state.current = { ...current };
+    if (state.timer !== null) {
+      window.clearTimeout(state.timer);
+      state.timer = null;
+    }
+    if (state.dwellAnchor) {
+      const anchor = state.dwellAnchor;
+      const distance = Math.hypot(
+        (current.x - anchor.x) * viewport.documentWidth,
+        (current.y - anchor.y) * viewport.documentHeight
+      );
+      if (distance >= 12) {
+        const previous = state.committed[state.committed.length - 1];
+        const incoming = Math.atan2(
+          (anchor.y - previous.y) * viewport.documentHeight,
+          (anchor.x - previous.x) * viewport.documentWidth
+        );
+        const outgoing = Math.atan2(
+          (current.y - anchor.y) * viewport.documentHeight,
+          (current.x - anchor.x) * viewport.documentWidth
+        );
+        const delta = Math.abs(Math.atan2(Math.sin(outgoing - incoming), Math.cos(outgoing - incoming)));
+        if (delta > Math.PI / 22.5) {
+          state.committed.push({ ...anchor });
+        }
+        state.dwellAnchor = null;
+      }
+    }
+    const first = state.committed[0];
+    const canClose = state.committed.length >= 3 && Math.hypot(
+      (current.x - first.x) * viewport.documentWidth,
+      (current.y - first.y) * viewport.documentHeight
+    ) <= 10;
+    const preview = canClose ? { ...first } : { ...current };
+    stroke.closed = canClose || undefined;
+    stroke.points = [...state.committed.map((point) => ({ ...point })), preview];
+    stroke.shape = state.committed.length > 1 ? "polyline" : "line";
+    this.strokeBounds.delete(stroke);
+    this.schedulePolylineDwell(stroke);
+  }
+
+  private schedulePolylineDwell(stroke: AnnotationStroke): void {
+    const state = this.polylineState;
+    if (!state || state.strokeId !== stroke.id || state.dwellAnchor || stroke.closed) {
+      return;
+    }
+    state.timer = window.setTimeout(() => {
+      const current = this.polylineState;
+      if (!current || current.strokeId !== stroke.id) {
+        return;
+      }
+      current.timer = null;
+      current.dwellAnchor = { ...current.current };
+    }, InkCanvas.SHAPE_DWELL_MS);
+  }
+
+  private finalizePolylineStroke(stroke: AnnotationStroke): void {
+    const state = this.polylineState;
+    if (!state || state.strokeId !== stroke.id) {
+      return;
+    }
+    if (state.timer !== null) {
+      window.clearTimeout(state.timer);
+    }
+    const points = state.committed.map((point) => ({ ...point }));
+    const first = points[0];
+    const current = state.current;
+    const viewport = this.activeViewport ?? this.currentViewport(this.canvas.getBoundingClientRect());
+    const closes = points.length >= 3 && Math.hypot(
+      (current.x - first.x) * viewport.documentWidth,
+      (current.y - first.y) * viewport.documentHeight
+    ) <= 10;
+    const last = points[points.length - 1];
+    if (!closes && Math.hypot(
+      (current.x - last.x) * viewport.documentWidth,
+      (current.y - last.y) * viewport.documentHeight
+    ) >= 1) {
+      points.push({ ...current });
+    }
+    stroke.points = points.length >= 2 ? points : [{ ...first }, { ...current }];
+    stroke.shape = stroke.points.length > 2 ? "polyline" : "line";
+    stroke.closed = closes || undefined;
+    this.strokeBounds.delete(stroke);
+    this.polylineState = null;
+  }
+
+  private clearPolylineState(): void {
+    if (this.polylineState?.timer !== null && this.polylineState?.timer !== undefined) {
+      window.clearTimeout(this.polylineState.timer);
+    }
+    this.polylineState = null;
+  }
+
+  private isConnector(stroke: AnnotationStroke): boolean {
+    return stroke.tool === "shape" && (
+      stroke.shape?.startsWith("connector-") === true ||
+      Boolean(stroke.startConnection || stroke.endConnection)
+    );
+  }
+
+  private attachConnectorEndpoint(
+    layer: AnnotationLayer,
+    connector: AnnotationStroke,
+    endpoint: "start" | "end"
+  ): void {
+    if (!this.isConnector(connector) || connector.points.length < 2) {
+      return;
+    }
+    const pointIndex = endpoint === "start" ? 0 : connector.points.length - 1;
+    const connection = this.findShapeConnection(layer, connector.points[pointIndex], connector.id);
+    if (endpoint === "start") {
+      connector.startConnection = connection;
+    } else {
+      connector.endConnection = connection;
+    }
+    if (connection) {
+      const target = layer.strokes.find((stroke) => stroke.id === connection.strokeId);
+      if (target) {
+        connector.points[pointIndex] = this.connectionPoint(target, connection);
+      }
+    }
+    this.rebuildConnectorPath(layer, connector);
+  }
+
+  private findShapeConnection(
+    layer: AnnotationLayer,
+    point: StrokePoint,
+    connectorId: string
+  ): ShapeConnection | undefined {
+    const viewport = this.currentViewport(this.canvas.getBoundingClientRect());
+    let best: { connection: ShapeConnection; distance: number } | null = null;
+    for (const stroke of layer.strokes) {
+      if (
+        stroke.id === connectorId ||
+        stroke.tool !== "shape" ||
+        this.isConnector(stroke) ||
+        stroke.pageIndex !== this.options.pageIndex
+      ) {
+        continue;
+      }
+      const bounds = this.getStrokeBounds(stroke);
+      const x = point.x * viewport.documentWidth;
+      const y = point.y * viewport.documentHeight;
+      const left = bounds.minX * viewport.documentWidth;
+      const right = bounds.maxX * viewport.documentWidth;
+      const top = bounds.minY * viewport.documentHeight;
+      const bottom = bounds.maxY * viewport.documentHeight;
+      if (x < left - 22 || x > right + 22 || y < top - 22 || y > bottom + 22) {
+        continue;
+      }
+      const candidates: Array<{ edge: ShapeConnection["edge"]; distance: number }> = [
+        { edge: "left", distance: Math.abs(x - left) },
+        { edge: "right", distance: Math.abs(x - right) },
+        { edge: "top", distance: Math.abs(y - top) },
+        { edge: "bottom", distance: Math.abs(y - bottom) }
+      ];
+      const nearest = candidates.sort((a, b) => a.distance - b.distance)[0];
+      if (nearest.distance > 22 || (best && best.distance <= nearest.distance)) {
+        continue;
+      }
+      const ratio = nearest.edge === "left" || nearest.edge === "right"
+        ? (y - top) / Math.max(1, bottom - top)
+        : (x - left) / Math.max(1, right - left);
+      best = {
+        connection: {
+          strokeId: stroke.id,
+          edge: nearest.edge,
+          ratio: Math.max(0, Math.min(1, ratio))
+        },
+        distance: nearest.distance
+      };
+    }
+    return best?.connection;
+  }
+
+  private connectionPoint(target: AnnotationStroke, connection: ShapeConnection): StrokePoint {
+    const bounds = this.getStrokeBounds(target);
+    if (connection.edge === "left" || connection.edge === "right") {
+      return {
+        x: connection.edge === "left" ? bounds.minX : bounds.maxX,
+        y: bounds.minY + (bounds.maxY - bounds.minY) * connection.ratio,
+        pressure: 0.5
+      };
+    }
+    return {
+      x: bounds.minX + (bounds.maxX - bounds.minX) * connection.ratio,
+      y: connection.edge === "top" ? bounds.minY : bounds.maxY,
+      pressure: 0.5
+    };
+  }
+
+  private rebuildConnectorPath(layer: AnnotationLayer, connector: AnnotationStroke): void {
+    if (connector.points.length < 2) {
+      return;
+    }
+    const targetPoint = (connection: ShapeConnection | undefined, fallback: StrokePoint): StrokePoint => {
+      const target = connection
+        ? layer.strokes.find((stroke) => stroke.id === connection.strokeId)
+        : undefined;
+      return target ? this.connectionPoint(target, connection as ShapeConnection) : { ...fallback };
+    };
+    const start = targetPoint(connector.startConnection, connector.points[0]);
+    const end = targetPoint(connector.endConnection, connector.points[connector.points.length - 1]);
+    if (connector.shape === "connector-straight" || connector.shape === "connector-elbow" || connector.shape === "connector-curve") {
+      connector.points = this.shapePoints(start, end, connector.shape);
+    } else {
+      connector.points[0] = start;
+      connector.points[connector.points.length - 1] = end;
+    }
+    this.strokeBounds.delete(connector);
+  }
+
+  private updateAttachedConnectors(
+    document: AnnotationDocument,
+    movedTargetIds: Set<string>
+  ): void {
+    if (movedTargetIds.size === 0) {
+      return;
+    }
+    for (const layer of document.layers) {
+      for (const stroke of layer.strokes) {
+        if (
+          (stroke.startConnection && movedTargetIds.has(stroke.startConnection.strokeId)) ||
+          (stroke.endConnection && movedTargetIds.has(stroke.endConnection.strokeId))
+        ) {
+          this.rebuildConnectorPath(layer, stroke);
+        }
+      }
+    }
+  }
+
+  private detachExternalConnectorLinks(
+    strokes: AnnotationStroke[],
+    movedIds: Set<string>
+  ): void {
+    for (const stroke of strokes) {
+      if (stroke.startConnection && !movedIds.has(stroke.startConnection.strokeId)) {
+        stroke.startConnection = undefined;
+      }
+      if (stroke.endConnection && !movedIds.has(stroke.endConnection.strokeId)) {
+        stroke.endConnection = undefined;
+      }
+    }
   }
 
   private findObjectAtPoint(
@@ -1616,6 +2455,9 @@ export class InkCanvas {
       if (stroke.tool !== tool || stroke.pageIndex !== this.options.pageIndex) {
         continue;
       }
+      if (tool === "shape" && !this.shapeContainsPoint(stroke, point, viewport)) {
+        continue;
+      }
       const bounds = this.getStrokeBounds(stroke);
       if (
         point.x >= bounds.minX - paddingX &&
@@ -1627,6 +2469,18 @@ export class InkCanvas {
       }
     }
     return null;
+  }
+
+  private shapeContainsPoint(
+    stroke: AnnotationStroke,
+    point: StrokePoint,
+    viewport: InkCanvasViewport
+  ): boolean {
+    const bounds = this.getStrokeBounds(stroke);
+    if (stroke.shape === "rectangle" || stroke.shape === "ellipse") {
+      return this.pointInBounds(point, bounds);
+    }
+    return this.strokeHitTest(stroke, point, Math.max(12, stroke.size / 2 + 8));
   }
 
   private findTextAtPoint(
@@ -1647,13 +2501,39 @@ export class InkCanvas {
   }
 
   private selectShape(layerId: string, strokeId: string): void {
+    const layer = this.options.getDocument().layers.find((item) => item.id === layerId);
+    const stroke = layer?.strokes.find((item) => item.id === strokeId);
+    if (!layer || !stroke) {
+      return;
+    }
+    this.cancelSelection();
     this.selectedShapeLayerId = layerId;
     this.selectedShapeId = strokeId;
+    const selected = stroke.groupId
+      ? layer.strokes.filter((item) => item.groupId === stroke.groupId)
+      : [stroke];
+    this.selectedLayerId = layer.id;
+    this.selectedStrokeIds = new Set(selected.map((item) => item.id));
+    this.selectionBounds = selected.reduce<SelectionBounds | null>(
+      (bounds, item) => this.unionBounds(bounds, this.getStrokeBounds(item)),
+      null
+    );
+    if (this.selectionBounds) {
+      this.lassoPoints = this.rectanglePoints(this.selectionBounds);
+      const viewport = this.currentViewport(this.canvas.getBoundingClientRect());
+      this.selectionOverlay.setSelection(
+        this.lassoPoints,
+        this.selectionBounds,
+        viewport,
+        this.canvas.getBoundingClientRect()
+      );
+    }
     this.refreshShapeOverlay();
   }
 
   private clearShapeSelection(): void {
     this.endShapeAnchorDrag();
+    this.finishShapeMove(false);
     this.selectedShapeLayerId = null;
     this.selectedShapeId = null;
     this.shapeOverlay.clear();
@@ -1672,8 +2552,9 @@ export class InkCanvas {
       this.clearShapeSelection();
       return;
     }
-    const viewport = this.currentViewport(this.canvas.getBoundingClientRect());
-    this.shapeOverlay.setStroke(stroke, viewport);
+    const rect = this.canvas.getBoundingClientRect();
+    const viewport = this.currentViewport(rect);
+    this.shapeOverlay.setStroke(stroke, viewport, rect);
   }
 
   private beginShapeAnchorDrag(event: PointerEvent, pointIndex: number): void {
@@ -1687,11 +2568,16 @@ export class InkCanvas {
     if (!layer || !stroke || !stroke.points[pointIndex]) {
       return;
     }
+    if (stroke.locked) {
+      new Notice("图形已锁定");
+      return;
+    }
     this.shapeEditState = {
       pointerId: event.pointerId,
       layerId: layer.id,
       strokeId: stroke.id,
       pointIndex,
+      historyDocument: this.snapshotDocument(this.options.getDocument()),
       changed: false
     };
     window.addEventListener("pointermove", this.handleShapeAnchorMove, { passive: false });
@@ -1714,13 +2600,19 @@ export class InkCanvas {
       return;
     }
     if (!state.changed) {
-      this.pushHistory(this.options.getDocument());
       state.changed = true;
+      if (state.pointIndex === 0) {
+        stroke.startConnection = undefined;
+      }
+      if (state.pointIndex === stroke.points.length - 1) {
+        stroke.endConnection = undefined;
+      }
     }
     const viewport = this.currentViewport(this.canvas.getBoundingClientRect());
     const rect = this.canvas.getBoundingClientRect();
     stroke.points[state.pointIndex] = this.pointFromEvent(event, rect, viewport);
     this.strokeBounds.delete(stroke);
+    this.updateAttachedConnectors(this.options.getDocument(), new Set([stroke.id]));
     this.render();
   };
 
@@ -1733,11 +2625,153 @@ export class InkCanvas {
 
   private endShapeAnchorDrag(): void {
     const changed = this.shapeEditState?.changed ?? false;
+    const state = this.shapeEditState;
     this.shapeEditState = null;
     window.removeEventListener("pointermove", this.handleShapeAnchorMove);
     window.removeEventListener("pointerup", this.handleShapeAnchorEnd);
     window.removeEventListener("pointercancel", this.handleShapeAnchorEnd);
     if (changed) {
+      if (state) {
+        this.pushHistoryEntry({ kind: "snapshot", document: state.historyDocument });
+      }
+      if (state) {
+        const document = this.options.getDocument();
+        const layer = document.layers.find((item) => item.id === state.layerId);
+        const stroke = layer?.strokes.find((item) => item.id === state.strokeId);
+        if (layer && stroke && this.isConnector(stroke)) {
+          this.attachConnectorEndpoint(layer, stroke, state.pointIndex === 0 ? "start" : "end");
+        }
+      }
+      this.options.onDocumentChange(this.options.getDocument(), false);
+    }
+  }
+
+  private insertShapeControlPoint(segmentIndex: number): void {
+    const document = this.options.getDocument();
+    const layer = document.layers.find((item) => item.id === this.selectedShapeLayerId);
+    const stroke = layer?.strokes.find((item) => item.id === this.selectedShapeId);
+    if (!layer || !stroke || stroke.locked || stroke.points.length < 2) {
+      return;
+    }
+    const start = stroke.points[segmentIndex];
+    const end = stroke.points[(segmentIndex + 1) % stroke.points.length];
+    if (!start || !end) {
+      return;
+    }
+    this.pushHistory(document);
+    stroke.points.splice(segmentIndex + 1, 0, {
+      x: (start.x + end.x) / 2,
+      y: (start.y + end.y) / 2,
+      pressure: 0.5
+    });
+    stroke.shape = "polyline";
+    this.strokeBounds.delete(stroke);
+    this.refreshSelectionBounds();
+    this.render();
+    this.options.onDocumentChange(document, false);
+  }
+
+  private deleteShapeControlPoint(pointIndex: number): void {
+    const document = this.options.getDocument();
+    const layer = document.layers.find((item) => item.id === this.selectedShapeLayerId);
+    const stroke = layer?.strokes.find((item) => item.id === this.selectedShapeId);
+    if (!layer || !stroke || stroke.locked || stroke.points.length <= 2) {
+      return;
+    }
+    this.pushHistory(document);
+    stroke.points.splice(pointIndex, 1);
+    if (pointIndex === 0) {
+      stroke.startConnection = undefined;
+    }
+    if (pointIndex >= stroke.points.length) {
+      stroke.endConnection = undefined;
+    }
+    stroke.shape = stroke.points.length === 2 && !stroke.closed ? "line" : "polyline";
+    this.strokeBounds.delete(stroke);
+    this.refreshSelectionBounds();
+    this.render();
+    this.options.onDocumentChange(document, false);
+  }
+
+  private beginShapeMove(
+    event: PointerEvent,
+    layer: AnnotationLayer,
+    stroke: AnnotationStroke
+  ): void {
+    const members = stroke.groupId
+      ? layer.strokes.filter((item) => item.groupId === stroke.groupId)
+      : [stroke];
+    if (members.some((item) => item.locked)) {
+      new Notice("图形或编组已锁定");
+      return;
+    }
+    this.shapeMoveState = {
+      pointerId: event.pointerId,
+      layerId: layer.id,
+      startX: event.clientX,
+      startY: event.clientY,
+      originals: new Map(members.map((item) => [
+        item.id,
+        item.points.map((point) => ({ ...point }))
+      ])),
+      movedIds: new Set(members.map((item) => item.id)),
+      historyDocument: this.snapshotDocument(this.options.getDocument()),
+      changed: false
+    };
+  }
+
+  private updateShapeMove(event: PointerEvent): void {
+    const state = this.shapeMoveState;
+    if (!state || state.pointerId !== event.pointerId) {
+      return;
+    }
+    const viewport = this.currentViewport(this.canvas.getBoundingClientRect());
+    let dx = (event.clientX - state.startX) / Math.max(1, viewport.documentWidth);
+    let dy = (event.clientY - state.startY) / Math.max(1, viewport.documentHeight);
+    if (!state.changed && Math.hypot(event.clientX - state.startX, event.clientY - state.startY) < 3) {
+      return;
+    }
+    const document = this.options.getDocument();
+    const layer = document.layers.find((item) => item.id === state.layerId);
+    if (!layer) {
+      return;
+    }
+    if (!state.changed) {
+      state.changed = true;
+      const moving = layer.strokes.filter((item) => state.movedIds.has(item.id));
+      this.detachExternalConnectorLinks(moving, state.movedIds);
+    }
+    let groupBounds: SelectionBounds | null = null;
+    for (const points of state.originals.values()) {
+      groupBounds = this.unionBounds(groupBounds, this.boundsForPoints(points));
+    }
+    if (groupBounds) {
+      dx = Math.max(-groupBounds.minX, Math.min(1 - groupBounds.maxX, dx));
+      dy = Math.max(-groupBounds.minY, Math.min(1 - groupBounds.maxY, dy));
+    }
+    for (const stroke of layer.strokes) {
+      const original = state.originals.get(stroke.id);
+      if (!original) {
+        continue;
+      }
+      stroke.points = original.map((point) => ({
+        ...point,
+        x: point.x + dx,
+        y: point.y + dy
+      }));
+      this.strokeBounds.delete(stroke);
+    }
+    this.updateAttachedConnectors(document, state.movedIds);
+    this.refreshSelectionBounds();
+    this.render();
+  }
+
+  private finishShapeMove(commit: boolean): void {
+    const state = this.shapeMoveState;
+    const changed = state?.changed ?? false;
+    this.shapeMoveState = null;
+    if (changed && commit) {
+      this.pushHistoryEntry({ kind: "snapshot", document: state?.historyDocument as AnnotationDocument });
       this.options.onDocumentChange(this.options.getDocument(), false);
     }
   }
@@ -1996,6 +3030,9 @@ export class InkCanvas {
     event: PointerEvent,
     inputChannel: "pointer" | "stylus-touch" = "pointer"
   ): void {
+    if (this.pastePromptPoint) {
+      this.hidePastePrompt();
+    }
     if (this.activePointerId !== null) {
       if (event.pointerType !== "pen") {
         return;
@@ -2029,6 +3066,8 @@ export class InkCanvas {
       const text = this.findTextAtPoint(document, point);
       if (text) {
         this.startTextLongPress(event, text.layer, text.stroke, "touch-pan");
+      } else if (InkCanvas.selectionClipboard) {
+        this.startCanvasLongPress(event, point);
       }
       return;
     }
@@ -2084,8 +3123,7 @@ export class InkCanvas {
       const existing = this.findObjectAtPoint(layer, point, "shape");
       if (existing) {
         this.selectShape(layer.id, existing.id);
-        this.resetPointerState();
-        this.resumePendingDocumentPublish();
+        this.beginShapeMove(event, layer, existing);
         return;
       }
       this.clearShapeSelection();
@@ -2172,7 +3210,9 @@ export class InkCanvas {
     if (this.activePointerKind === "pan") {
       const pendingLongPress = this.textLongPress?.pointerId === event.pointerId;
       const moved = this.textLongPressMoved(event);
-      if (pendingLongPress && !moved) {
+      const pendingCanvasLongPress = this.canvasLongPress?.pointerId === event.pointerId;
+      const canvasMoved = this.canvasLongPressMoved(event);
+      if ((pendingLongPress && !moved) || (pendingCanvasLongPress && !canvasMoved)) {
         return;
       }
       const deltaX = this.panLastX - event.clientX;
@@ -2186,6 +3226,10 @@ export class InkCanvas {
       this.panLastY = event.clientY;
       this.panLastTime = now;
       this.options.onFingerPan?.(deltaX, deltaY);
+      return;
+    }
+    if (this.shapeMoveState?.pointerId === event.pointerId) {
+      this.updateShapeMove(event);
       return;
     }
     if (this.textLongPress?.pointerId === event.pointerId) {
@@ -2234,6 +3278,7 @@ export class InkCanvas {
     }
     if (this.activePointerKind === "pan") {
       this.cancelTextLongPress();
+      this.cancelCanvasLongPress();
       const pointerId = event.pointerId;
       const velocityX = this.panVelocityX;
       const velocityY = this.panVelocityY;
@@ -2244,6 +3289,18 @@ export class InkCanvas {
       if (event.type === "pointerup") {
         this.startPanInertia(velocityX, velocityY);
       }
+      return;
+    }
+
+    if (this.shapeMoveState?.pointerId === event.pointerId) {
+      this.updateShapeMove(event);
+      this.finishShapeMove(true);
+      const pointerId = event.pointerId;
+      this.resetPointerState();
+      if (this.canvas.hasPointerCapture(pointerId)) {
+        this.canvas.releasePointerCapture(pointerId);
+      }
+      this.resumePendingDocumentPublish();
       return;
     }
 
@@ -2268,6 +3325,13 @@ export class InkCanvas {
       const stroke = this.activeStroke;
       const layerId = this.activeStrokeLayerId;
       this.updateObjectStroke(event);
+      this.finalizePolylineStroke(stroke);
+      if (layerId && this.isConnector(stroke)) {
+        const layer = this.options.getDocument().layers.find((item) => item.id === layerId);
+        if (layer) {
+          this.attachConnectorEndpoint(layer, stroke, "end");
+        }
+      }
       this.finalizeActiveStroke();
       if (layerId) {
         this.selectShape(layerId, stroke.id);
@@ -2323,6 +3387,13 @@ export class InkCanvas {
       event.preventDefault();
     }
     this.cancelTextLongPress();
+    this.cancelCanvasLongPress();
+    this.clearPolylineState();
+    if (this.shapeMoveState) {
+      this.finishShapeMove(true);
+      this.finishNonStrokeInteraction(false);
+      return;
+    }
     if (this.activePointerKind === "draw" && this.activeStroke) {
       this.finalizeActiveStroke();
       return;
@@ -2363,6 +3434,7 @@ export class InkCanvas {
 
   private resetPointerState(): void {
     this.cancelTextLongPress();
+    this.cancelCanvasLongPress();
     this.activePointerId = null;
     this.activePointerKind = null;
     this.activeInputChannel = null;
@@ -2446,11 +3518,15 @@ export class InkCanvas {
       ) {
         continue;
       }
+      if (stroke.locked) {
+        continue;
+      }
       if (!this.strokeHitTest(stroke, point, eraserRadius)) {
         continue;
       }
       if (stroke.tool === "shape" || stroke.tool === "text") {
         layer.strokes.splice(index, 1);
+        this.detachConnectionsToDeleted(this.options.getDocument(), new Set([stroke.id]));
         if (stroke.id === this.selectedShapeId) {
           this.clearShapeSelection();
         }
@@ -3469,6 +4545,21 @@ export class InkCanvas {
       }
       this.selectedStrokeIds.add(stroke.id);
       selectedBounds = this.unionBounds(selectedBounds, this.getStrokeBounds(stroke));
+    }
+
+    const selectedGroups = new Set(
+      layer.strokes
+        .filter((stroke) => this.selectedStrokeIds.has(stroke.id) && stroke.groupId)
+        .map((stroke) => stroke.groupId as string)
+    );
+    if (selectedGroups.size > 0) {
+      for (const stroke of layer.strokes) {
+        if (!stroke.groupId || !selectedGroups.has(stroke.groupId)) {
+          continue;
+        }
+        this.selectedStrokeIds.add(stroke.id);
+        selectedBounds = this.unionBounds(selectedBounds, this.getStrokeBounds(stroke));
+      }
     }
 
     if (!selectedBounds || this.selectedStrokeIds.size === 0) {

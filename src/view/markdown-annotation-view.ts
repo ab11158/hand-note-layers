@@ -10,7 +10,9 @@ import {
   AnnotationTool,
   EraserMode,
   SelectionMode,
+  ShapeArrowHead,
   ShapeKind,
+  ShapeLineStyle,
   createLayer,
   getActiveLayer,
   nextLayerName
@@ -64,6 +66,10 @@ export class MarkdownAnnotationView extends ItemView {
   private eraserMode: EraserMode = "partial";
   private selectionMode: SelectionMode = "free";
   private shapeKind: ShapeKind = "rectangle";
+  private shapeLineStyle: ShapeLineStyle = "solid";
+  private shapeStartArrow: ShapeArrowHead = "none";
+  private shapeEndArrow: ShapeArrowHead = "none";
+  private shapeFillEnabled = false;
 
   constructor(leaf: WorkspaceLeaf) {
     super(leaf);
@@ -161,6 +167,10 @@ export class MarkdownAnnotationView extends ItemView {
       getEraserMode: () => this.eraserMode,
       getSelectionMode: () => this.selectionMode,
       getShapeKind: () => this.shapeKind,
+      getShapeLineStyle: () => this.shapeLineStyle,
+      getShapeStartArrow: () => this.shapeStartArrow,
+      getShapeEndArrow: () => this.shapeEndArrow,
+      getShapeFillEnabled: () => this.shapeFillEnabled,
       getPressureEnabled: () => this.pressureEnabled,
       onDocumentChange: (next, renderCanvas) =>
         this.handleDocumentChange(next, renderCanvas, false),
@@ -177,7 +187,8 @@ export class MarkdownAnnotationView extends ItemView {
         this.scrollContainer.scrollTop += deltaY;
       },
       onPencilShortcut: () => this.togglePenAndEraser(),
-      onRequestTool: (tool) => this.setTool(tool)
+      onRequestTool: (tool) => this.setTool(tool),
+      onClipboardChange: (available) => this.annotationToolbar?.setPasteEnabled(available)
     });
     this.surface.append(
       this.inkCanvas.canvas,
@@ -236,6 +247,10 @@ export class MarkdownAnnotationView extends ItemView {
       initialEraserMode: this.eraserMode,
       initialSelectionMode: this.selectionMode,
       initialShapeKind: this.shapeKind,
+      initialShapeLineStyle: this.shapeLineStyle,
+      initialShapeStartArrow: this.shapeStartArrow,
+      initialShapeEndArrow: this.shapeEndArrow,
+      initialShapeFillEnabled: this.shapeFillEnabled,
       getSize: (tool) => this.toolSizes[tool],
       onToolChange: (tool) => this.setTool(tool),
       onColorChange: (color) => this.setColor(color),
@@ -259,6 +274,23 @@ export class MarkdownAnnotationView extends ItemView {
       onShapeKindChange: (kind) => {
         this.shapeKind = kind;
       },
+      onShapeLineStyleChange: (style) => {
+        this.shapeLineStyle = style;
+        this.currentInkCanvas()?.setSelectedShapeLineStyle(style);
+      },
+      onShapeArrowChange: (position, arrow) => {
+        if (position === "start") {
+          this.shapeStartArrow = arrow;
+        } else {
+          this.shapeEndArrow = arrow;
+        }
+        this.currentInkCanvas()?.setSelectedShapeArrow(position, arrow);
+      },
+      onShapeFillChange: (enabled) => {
+        this.shapeFillEnabled = enabled;
+        this.currentInkCanvas()?.setSelectedShapeFill(enabled);
+      },
+      onPaste: () => this.currentInkCanvas()?.pasteClipboardAtViewportCenter(),
       onWhiteboard: () => this.toggleWhiteboard(),
       onUndo: () => this.currentInkCanvas()?.undo(),
       onRedo: () => this.currentInkCanvas()?.redo(),
@@ -538,6 +570,10 @@ export class MarkdownAnnotationView extends ItemView {
       getEraserSize: () => this.toolSizes.eraser,
       getEraserMode: () => this.eraserMode,
       getShapeKind: () => this.shapeKind,
+      getShapeLineStyle: () => this.shapeLineStyle,
+      getShapeStartArrow: () => this.shapeStartArrow,
+      getShapeEndArrow: () => this.shapeEndArrow,
+      getShapeFillEnabled: () => this.shapeFillEnabled,
       getPressureEnabled: () => this.pressureEnabled,
       onActivate: () => {
         this.activeInkTarget = "whiteboard";
@@ -546,7 +582,8 @@ export class MarkdownAnnotationView extends ItemView {
       onSave: (layer, draft) => this.saveWhiteboardLayer(layer, draft.id),
       onDelete: () => this.deleteWhiteboard(),
       onPencilShortcut: () => this.togglePenAndEraser(),
-      onRequestTool: (tool) => this.setTool(tool)
+      onRequestTool: (tool) => this.setTool(tool),
+      onClipboardChange: (available) => this.annotationToolbar?.setPasteEnabled(available)
     });
     this.activeInkTarget = "whiteboard";
     this.annotationToolbar?.setWhiteboardActive(true);
@@ -592,6 +629,10 @@ export class MarkdownAnnotationView extends ItemView {
       getEraserSize: () => this.toolSizes.eraser,
       getEraserMode: () => this.eraserMode,
       getShapeKind: () => this.shapeKind,
+      getShapeLineStyle: () => this.shapeLineStyle,
+      getShapeStartArrow: () => this.shapeStartArrow,
+      getShapeEndArrow: () => this.shapeEndArrow,
+      getShapeFillEnabled: () => this.shapeFillEnabled,
       getPressureEnabled: () => this.pressureEnabled,
       onActivate: () => {
         this.activeInkTarget = "whiteboard";
@@ -601,7 +642,8 @@ export class MarkdownAnnotationView extends ItemView {
         this.saveWhiteboardLayer(nextLayer, nextDraft.id),
       onDelete: () => this.deleteWhiteboard(),
       onPencilShortcut: () => this.togglePenAndEraser(),
-      onRequestTool: (tool) => this.setTool(tool)
+      onRequestTool: (tool) => this.setTool(tool),
+      onClipboardChange: (available) => this.annotationToolbar?.setPasteEnabled(available)
     });
     this.activeInkTarget = "whiteboard";
     this.annotationToolbar?.setWhiteboardActive(true);

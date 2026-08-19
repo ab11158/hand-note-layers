@@ -1,6 +1,7 @@
 import { setIcon } from "obsidian";
 import { StrokePoint } from "../model/annotation";
 import type { InkCanvasViewport } from "./ink-canvas";
+import { setControlTooltip } from "./ui";
 
 export interface SelectionBounds {
   minX: number;
@@ -8,6 +9,22 @@ export interface SelectionBounds {
   maxX: number;
   maxY: number;
 }
+
+export type SelectionOperation =
+  | "lock"
+  | "unlock"
+  | "group"
+  | "ungroup"
+  | "front"
+  | "back"
+  | "align-left"
+  | "align-center"
+  | "align-right"
+  | "align-top"
+  | "align-middle"
+  | "align-bottom"
+  | "distribute-horizontal"
+  | "distribute-vertical";
 
 export class SelectionOverlay {
   readonly element: HTMLDivElement;
@@ -27,7 +44,8 @@ export class SelectionOverlay {
     onPaste: () => void,
     onColor: (color: string) => void,
     onScreenshot: () => void,
-    onTransformStart: (event: PointerEvent, handle: string) => void
+    onTransformStart: (event: PointerEvent, handle: string) => void,
+    onOperation: (operation: SelectionOperation) => void
   ) {
     this.element = document.createElement("div");
     this.element.className = "hand-note-selection-layer";
@@ -68,6 +86,27 @@ export class SelectionOverlay {
     colorInput.addEventListener("input", () => onColor(colorInput.value));
     const screenshotButton = this.createButton("camera", "截屏");
     screenshotButton.addEventListener("click", onScreenshot);
+    const operationButtons: Array<[string, string, SelectionOperation]> = [
+      ["lock", "锁定", "lock"],
+      ["unlock", "解锁", "unlock"],
+      ["group", "编组", "group"],
+      ["ungroup", "取消编组", "ungroup"],
+      ["bring-to-front", "置于顶层", "front"],
+      ["send-to-back", "置于底层", "back"],
+      ["align-start-horizontal", "左对齐", "align-left"],
+      ["align-center-horizontal", "水平居中", "align-center"],
+      ["align-end-horizontal", "右对齐", "align-right"],
+      ["align-start-vertical", "顶端对齐", "align-top"],
+      ["align-center-vertical", "垂直居中", "align-middle"],
+      ["align-end-vertical", "底端对齐", "align-bottom"],
+      ["columns-3", "水平分布", "distribute-horizontal"],
+      ["rows-3", "垂直分布", "distribute-vertical"]
+    ];
+    const objectButtons = operationButtons.map(([icon, label, operation]) => {
+      const button = this.createButton(icon, label);
+      button.addEventListener("click", () => onOperation(operation));
+      return button;
+    });
     const cancelButton = this.createButton("x", "取消选择");
     cancelButton.addEventListener("click", onCancel);
     this.menu.append(
@@ -80,6 +119,7 @@ export class SelectionOverlay {
       colorButton,
       colorInput,
       screenshotButton,
+      ...objectButtons,
       cancelButton
     );
 
@@ -98,7 +138,7 @@ export class SelectionOverlay {
       const button = document.createElement("button");
       button.type = "button";
       button.className = `hand-note-selection-handle is-${handle}`;
-      button.setAttribute("aria-label", `缩放选区 ${handle}`);
+      setControlTooltip(button, `缩放选区 ${handle}`);
       button.addEventListener("pointerdown", (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -109,8 +149,8 @@ export class SelectionOverlay {
     const rotateButton = document.createElement("button");
     rotateButton.type = "button";
     rotateButton.className = "hand-note-selection-handle is-rotate";
-    rotateButton.setAttribute("aria-label", "旋转选区");
     setIcon(rotateButton, "rotate-cw");
+    setControlTooltip(rotateButton, "旋转选区");
     rotateButton.addEventListener("pointerdown", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -154,7 +194,7 @@ export class SelectionOverlay {
 
     const menuWidth = Math.min(292, Math.max(0, canvasRect.width - 16));
     const menuLeft = Math.max(8, Math.min(canvasRect.width - menuWidth - 8, left + width - menuWidth));
-    const estimatedMenuHeight = 82;
+    const estimatedMenuHeight = 126;
     const menuTop = top >= estimatedMenuHeight + 8
       ? top - estimatedMenuHeight - 6
       : Math.min(canvasRect.height - estimatedMenuHeight - 8, top + height + 8);
@@ -213,9 +253,8 @@ export class SelectionOverlay {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "clickable-icon hand-note-tool";
-    button.setAttribute("aria-label", label);
-    button.setAttribute("title", label);
     setIcon(button, icon);
+    setControlTooltip(button, label);
     return button;
   }
 }

@@ -82,6 +82,16 @@ function migrateDocument(value: unknown, sourcePath: string): AnnotationDocument
               : [],
             pageIndex: stroke.pageIndex,
             shape: stroke.shape,
+            lineStyle: stroke.lineStyle,
+            startArrow: stroke.startArrow,
+            endArrow: stroke.endArrow,
+            fillColor: stroke.fillColor,
+            fillOpacity: stroke.fillOpacity,
+            closed: stroke.closed,
+            locked: stroke.locked,
+            groupId: stroke.groupId,
+            startConnection: stroke.startConnection,
+            endConnection: stroke.endConnection,
             text: stroke.text,
             fontSize: stroke.fontSize
           }))

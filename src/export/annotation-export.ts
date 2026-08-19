@@ -46,6 +46,85 @@ function xmlEscape(value: string): string {
   });
 }
 
+interface ExportPoint {
+  x: number;
+  y: number;
+}
+
+function shapePathData(
+  stroke: AnnotationDocument["layers"][number]["strokes"][number],
+  points: ExportPoint[]
+): string {
+  if ((stroke.shape === "curve" || stroke.shape === "connector-curve") && points.length >= 4) {
+    return `M${points[0].x},${points[0].y} C${points[1].x},${points[1].y} ${points[2].x},${points[2].y} ${points[3].x},${points[3].y}`;
+  }
+  if (stroke.shape === "ellipse" && points.length >= 4) {
+    const commands: string[] = [`M${points[0].x},${points[0].y}`];
+    for (let index = 0; index < 4; index += 1) {
+      const previous = points[(index + 3) % 4];
+      const current = points[index];
+      const next = points[(index + 1) % 4];
+      const after = points[(index + 2) % 4];
+      commands.push(
+        `C${current.x + (next.x - previous.x) / 6},${current.y + (next.y - previous.y) / 6} ` +
+        `${next.x - (after.x - current.x) / 6},${next.y - (after.y - current.y) / 6} ${next.x},${next.y}`
+      );
+    }
+    commands.push("Z");
+    return commands.join(" ");
+  }
+  const commands = points.map((point, index) => `${index === 0 ? "M" : "L"}${point.x},${point.y}`);
+  if (stroke.closed || stroke.shape === "rectangle") {
+    commands.push("Z");
+  }
+  return commands.join(" ");
+}
+
+function shapeArrowSvg(
+  tip: ExportPoint,
+  adjacent: ExportPoint,
+  arrow: AnnotationDocument["layers"][number]["strokes"][number]["endArrow"],
+  color: string,
+  opacity: number,
+  strokeWidth: number
+): string {
+  if (!arrow || arrow === "none") {
+    return "";
+  }
+  const angle = Math.atan2(tip.y - adjacent.y, tip.x - adjacent.x);
+  const length = Math.max(7, Math.min(13, 7 + strokeWidth));
+  if (arrow === "circle") {
+    return `<circle cx="${tip.x}" cy="${tip.y}" r="${Math.max(2.5, Math.min(5, strokeWidth + 2))}" fill="${color}" opacity="${opacity}"/>`;
+  }
+  const back = {
+    x: tip.x - Math.cos(angle) * length,
+    y: tip.y - Math.sin(angle) * length
+  };
+  if (arrow === "diamond") {
+    const half = length * 0.42;
+    const middle = { x: (tip.x + back.x) / 2, y: (tip.y + back.y) / 2 };
+    const first = {
+      x: middle.x + Math.cos(angle + Math.PI / 2) * half,
+      y: middle.y + Math.sin(angle + Math.PI / 2) * half
+    };
+    const second = {
+      x: middle.x + Math.cos(angle - Math.PI / 2) * half,
+      y: middle.y + Math.sin(angle - Math.PI / 2) * half
+    };
+    return `<polygon points="${tip.x},${tip.y} ${first.x},${first.y} ${back.x},${back.y} ${second.x},${second.y}" fill="${color}" opacity="${opacity}"/>`;
+  }
+  const spread = Math.PI / 7;
+  const first = {
+    x: tip.x - Math.cos(angle - spread) * length,
+    y: tip.y - Math.sin(angle - spread) * length
+  };
+  const second = {
+    x: tip.x - Math.cos(angle + spread) * length,
+    y: tip.y - Math.sin(angle + spread) * length
+  };
+  return `<polygon points="${tip.x},${tip.y} ${first.x},${first.y} ${second.x},${second.y}" fill="${color}" opacity="${opacity}"/>`;
+}
+
 function strokeSvg(
   points: AnnotationDocument["layers"][number]["strokes"],
   layerOpacity: number
@@ -78,33 +157,21 @@ function strokeSvg(
           x: point.x * 1000,
           y: point.y * 1000
         }));
-        if (stroke.shape === "curve" && pixels.length >= 4) {
-          return `<path d="M${pixels[0].x},${pixels[0].y} C${pixels[1].x},${pixels[1].y} ${pixels[2].x},${pixels[2].y} ${pixels[3].x},${pixels[3].y}" fill="none" stroke="${color}" stroke-width="${stroke.size}" stroke-linecap="round" opacity="${opacity}"/>`;
-        }
-        if (stroke.shape === "ellipse" && pixels.length >= 4) {
-          const commands: string[] = [`M${pixels[0].x},${pixels[0].y}`];
-          for (let index = 0; index < 4; index += 1) {
-            const previous = pixels[(index + 3) % 4];
-            const current = pixels[index];
-            const next = pixels[(index + 1) % 4];
-            const after = pixels[(index + 2) % 4];
-            commands.push(
-              `C${current.x + (next.x - previous.x) / 6},${
-                current.y + (next.y - previous.y) / 6
-              } ${next.x - (after.x - current.x) / 6},${
-                next.y - (after.y - current.y) / 6
-              } ${next.x},${next.y}`
-            );
-          }
-          commands.push("Z");
-          return `<path d="${commands.join(" ")}" fill="none" stroke="${color}" stroke-width="${stroke.size}" stroke-linejoin="round" opacity="${opacity}"/>`;
-        }
-        if (stroke.shape === "rectangle" && pixels.length >= 4) {
-          return `<polygon points="${line}" fill="none" stroke="${color}" stroke-width="${stroke.size}" stroke-linejoin="round" opacity="${opacity}"/>`;
-        }
-        const first = pixels[0];
-        const last = pixels[pixels.length - 1];
-        return `<line x1="${first.x}" y1="${first.y}" x2="${last.x}" y2="${last.y}" stroke="${color}" stroke-width="${stroke.size}" stroke-linecap="round" opacity="${opacity}"/>`;
+        const path = shapePathData(stroke, pixels);
+        const fill = stroke.fillColor && (stroke.closed || stroke.shape === "rectangle" || stroke.shape === "ellipse")
+          ? xmlEscape(stroke.fillColor)
+          : "none";
+        const dash = stroke.lineStyle === "dashed"
+          ? `${Math.max(6, stroke.size * 3)} ${Math.max(4, stroke.size * 2)}`
+          : stroke.lineStyle === "dotted"
+            ? `${Math.max(1, stroke.size * 0.4)} ${Math.max(4, stroke.size * 2)}`
+            : "";
+        const firstAdjacent = pixels[1];
+        const lastAdjacent = pixels[pixels.length - 2];
+        const arrows = stroke.closed || stroke.shape === "rectangle" || stroke.shape === "ellipse" || pixels.length < 2 ? "" :
+          shapeArrowSvg(pixels[0], firstAdjacent, stroke.startArrow, color, opacity, stroke.size) +
+          shapeArrowSvg(pixels[pixels.length - 1], lastAdjacent, stroke.endArrow, color, opacity, stroke.size);
+        return `<path d="${path}" fill="${fill}" fill-opacity="${stroke.fillOpacity ?? 0.14}" stroke="${color}" stroke-width="${stroke.size}" stroke-linecap="round" stroke-linejoin="round"${dash ? ` stroke-dasharray="${dash}"` : ""} opacity="${opacity}"/>${arrows}`;
       }
       if (stroke.points.length === 1) {
         const point = stroke.points[0];
@@ -249,6 +316,50 @@ function wrapCanvasText(
   return lines;
 }
 
+function drawCanvasShapeArrow(
+  context: CanvasRenderingContext2D,
+  tip: ExportPoint,
+  adjacent: ExportPoint,
+  arrow: AnnotationDocument["layers"][number]["strokes"][number]["endArrow"],
+  strokeWidth: number
+): void {
+  if (!arrow || arrow === "none") {
+    return;
+  }
+  const angle = Math.atan2(tip.y - adjacent.y, tip.x - adjacent.x);
+  const length = Math.max(7, Math.min(13, 7 + strokeWidth));
+  context.save();
+  context.setLineDash([]);
+  context.fillStyle = context.strokeStyle;
+  if (arrow === "circle") {
+    context.beginPath();
+    context.arc(tip.x, tip.y, Math.max(2.5, Math.min(5, strokeWidth + 2)), 0, Math.PI * 2);
+    context.fill();
+  } else if (arrow === "diamond") {
+    const backX = tip.x - Math.cos(angle) * length;
+    const backY = tip.y - Math.sin(angle) * length;
+    const middleX = (tip.x + backX) / 2;
+    const middleY = (tip.y + backY) / 2;
+    const half = length * 0.42;
+    context.beginPath();
+    context.moveTo(tip.x, tip.y);
+    context.lineTo(middleX + Math.cos(angle + Math.PI / 2) * half, middleY + Math.sin(angle + Math.PI / 2) * half);
+    context.lineTo(backX, backY);
+    context.lineTo(middleX + Math.cos(angle - Math.PI / 2) * half, middleY + Math.sin(angle - Math.PI / 2) * half);
+    context.closePath();
+    context.fill();
+  } else {
+    const spread = Math.PI / 7;
+    context.beginPath();
+    context.moveTo(tip.x, tip.y);
+    context.lineTo(tip.x - Math.cos(angle - spread) * length, tip.y - Math.sin(angle - spread) * length);
+    context.lineTo(tip.x - Math.cos(angle + spread) * length, tip.y - Math.sin(angle + spread) * length);
+    context.closePath();
+    context.fill();
+  }
+  context.restore();
+}
+
 function drawCanvasStroke(
   context: CanvasRenderingContext2D,
   stroke: AnnotationDocument["layers"][number]["strokes"][number],
@@ -294,8 +405,15 @@ function drawCanvasStroke(
       context.lineWidth = stroke.size;
       context.lineCap = "round";
       context.lineJoin = "round";
+      context.setLineDash(
+        stroke.lineStyle === "dashed"
+          ? [Math.max(6, stroke.size * 3), Math.max(4, stroke.size * 2)]
+          : stroke.lineStyle === "dotted"
+            ? [Math.max(1, stroke.size * 0.4), Math.max(4, stroke.size * 2)]
+            : []
+      );
       context.beginPath();
-      if (stroke.shape === "curve" && points.length >= 4) {
+      if ((stroke.shape === "curve" || stroke.shape === "connector-curve") && points.length >= 4) {
         context.moveTo(points[0].x, points[0].y);
         context.bezierCurveTo(
           points[1].x,
@@ -328,9 +446,30 @@ function drawCanvasStroke(
         context.closePath();
       } else {
         context.moveTo(points[0].x, points[0].y);
-        context.lineTo(points[points.length - 1].x, points[points.length - 1].y);
+        points.slice(1).forEach((point) => context.lineTo(point.x, point.y));
+        if (stroke.closed) {
+          context.closePath();
+        }
+      }
+      if (stroke.fillColor && (stroke.closed || stroke.shape === "rectangle" || stroke.shape === "ellipse")) {
+        context.save();
+        context.globalAlpha *= stroke.fillOpacity ?? 0.14;
+        context.fillStyle = stroke.fillColor;
+        context.fill();
+        context.restore();
       }
       context.stroke();
+      context.setLineDash([]);
+      if (!stroke.closed && stroke.shape !== "rectangle" && stroke.shape !== "ellipse") {
+        drawCanvasShapeArrow(context, points[0], points[1], stroke.startArrow, stroke.size);
+        drawCanvasShapeArrow(
+          context,
+          points[points.length - 1],
+          points[points.length - 2],
+          stroke.endArrow,
+          stroke.size
+        );
+      }
     }
     context.restore();
     return;

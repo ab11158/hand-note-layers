@@ -4,7 +4,9 @@ import {
   AnnotationLayer,
   AnnotationTool,
   EraserMode,
+  ShapeArrowHead,
   ShapeKind,
+  ShapeLineStyle,
   WhiteboardDraft,
   createEmptyDocument,
   generateId
@@ -29,6 +31,10 @@ export interface TemporaryWhiteboardOptions {
   getEraserSize: () => number;
   getEraserMode: () => EraserMode;
   getShapeKind: () => ShapeKind;
+  getShapeLineStyle: () => ShapeLineStyle;
+  getShapeStartArrow: () => ShapeArrowHead;
+  getShapeEndArrow: () => ShapeArrowHead;
+  getShapeFillEnabled: () => boolean;
   getPressureEnabled: () => boolean;
   onActivate: () => void;
   onChange?: (draft: WhiteboardDraft) => void;
@@ -36,6 +42,7 @@ export interface TemporaryWhiteboardOptions {
   onDelete: () => void;
   onPencilShortcut?: () => void;
   onRequestTool?: (tool: AnnotationTool) => void;
+  onClipboardChange?: (available: boolean) => void;
 }
 
 export function draftFromWhiteboardLayer(
@@ -153,6 +160,10 @@ export class TemporaryWhiteboard {
       getEraserSize: options.getEraserSize,
       getEraserMode: options.getEraserMode,
       getShapeKind: options.getShapeKind,
+      getShapeLineStyle: options.getShapeLineStyle,
+      getShapeStartArrow: options.getShapeStartArrow,
+      getShapeEndArrow: options.getShapeEndArrow,
+      getShapeFillEnabled: options.getShapeFillEnabled,
       getPressureEnabled: options.getPressureEnabled,
       onDocumentChange: (next) => {
         this.document = next;
@@ -164,7 +175,8 @@ export class TemporaryWhiteboard {
         this.panBy(deltaX, deltaY);
       },
       onPencilShortcut: options.onPencilShortcut,
-      onRequestTool: options.onRequestTool
+      onRequestTool: options.onRequestTool,
+      onClipboardChange: options.onClipboardChange
     });
     this.innerSurface.append(
       this.inkCanvas.canvas,
@@ -234,10 +246,25 @@ export class TemporaryWhiteboard {
       maxY: (this.bounds.top + this.bounds.height) / hostHeight,
       pageIndex
     };
-    const strokes = this.document.layers[0].strokes.map((stroke) => ({
+    const sourceStrokes = this.document.layers[0].strokes;
+    const idMap = new Map(sourceStrokes.map((stroke) => [stroke.id, generateId()]));
+    const groupMap = new Map<string, string>();
+    sourceStrokes.forEach((stroke) => {
+      if (stroke.groupId && !groupMap.has(stroke.groupId)) {
+        groupMap.set(stroke.groupId, generateId());
+      }
+    });
+    const strokes = sourceStrokes.map((stroke) => ({
       ...stroke,
-      id: generateId(),
+      id: idMap.get(stroke.id) ?? generateId(),
       pageIndex,
+      groupId: stroke.groupId ? groupMap.get(stroke.groupId) : undefined,
+      startConnection: stroke.startConnection && idMap.has(stroke.startConnection.strokeId)
+        ? { ...stroke.startConnection, strokeId: idMap.get(stroke.startConnection.strokeId) as string }
+        : undefined,
+      endConnection: stroke.endConnection && idMap.has(stroke.endConnection.strokeId)
+        ? { ...stroke.endConnection, strokeId: idMap.get(stroke.endConnection.strokeId) as string }
+        : undefined,
       points: stroke.points.map((point) => ({
         ...point,
         x: (this.bounds.left + point.x * this.virtualWidth - this.panX) / hostWidth,
