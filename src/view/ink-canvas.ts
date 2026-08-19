@@ -41,6 +41,7 @@ export interface InkCanvasOptions {
   onActivate?: () => void;
   onFingerPan?: (deltaX: number, deltaY: number) => void;
   onPencilShortcut?: () => void;
+  onRequestTool?: (tool: AnnotationTool) => void;
   pageIndex?: number;
 }
 
@@ -63,6 +64,10 @@ export class InkCanvas {
   private static readonly MAX_CANVAS_DIMENSION = 16_384;
   private static readonly MAX_LASSO_POINTS = 192;
   private static readonly PENCIL_COMPATIBILITY_GUARD_MS = 500;
+  private static selectionClipboard: {
+    strokes: AnnotationStroke[];
+    bounds: SelectionBounds;
+  } | null = null;
 
   readonly canvas: HTMLCanvasElement;
   readonly liveCanvas: HTMLCanvasElement;
@@ -166,6 +171,7 @@ export class InkCanvas {
     bounds: SelectionBounds;
     points: Map<string, StrokePoint[]>;
     textSizes: Map<string, { fontSize: number; size: number }>;
+    startAngle: number;
     changed: boolean;
   } | null = null;
   private readonly strokeBounds = new WeakMap<AnnotationStroke, {
@@ -209,9 +215,14 @@ export class InkCanvas {
       () => this.deleteSelection(),
       () => this.cancelSelection(),
       () => this.duplicateSelection(),
+      () => this.copySelection(),
+      () => this.cutSelection(),
+      () => this.pasteSelection(),
+      (color) => this.setSelectionColor(color),
       () => void this.exportSelectionScreenshot(),
       (event, handle) => this.beginSelectionTransform(event, handle)
     );
+    this.selectionOverlay.setPasteEnabled(InkCanvas.selectionClipboard !== null);
     this.selectionLayer = this.selectionOverlay.element;
     this.selectionOutline = this.selectionOverlay.outline;
     this.selectionMenu = this.selectionOverlay.menu;
@@ -222,6 +233,10 @@ export class InkCanvas {
     this.shapeControls = this.shapeOverlay.element;
     this.textEditorPortal = document.createElement("div");
     this.textEditorPortal.className = "hand-note-text-editor-portal";
+    const textEditorHeader = document.createElement("div");
+    textEditorHeader.className = "hand-note-text-editor-header";
+    const textEditorTitle = document.createElement("strong");
+    textEditorTitle.textContent = "编辑文本";
     const textEditorActions = document.createElement("div");
     textEditorActions.className = "hand-note-text-editor-actions";
     const cancelTextButton = document.createElement("button");
@@ -239,12 +254,14 @@ export class InkCanvas {
     setIcon(completeTextButton, "check");
     completeTextButton.addEventListener("click", this.commitTextEditor);
     textEditorActions.append(cancelTextButton, completeTextButton);
+    textEditorHeader.append(textEditorTitle, textEditorActions);
     this.textEditor = document.createElement("textarea");
     this.textEditor.className = "hand-note-text-editor";
     this.textEditor.setAttribute("aria-label", "编辑文本框");
+    this.textEditor.placeholder = "在此输入文本…";
     this.textEditor.addEventListener("input", this.handleTextEditorInput);
     this.textEditor.addEventListener("keydown", this.handleTextEditorKeyDown);
-    this.textEditorPortal.append(textEditorActions, this.textEditor);
+    this.textEditorPortal.append(textEditorHeader, this.textEditor);
 
     this.canvas.addEventListener("pointerdown", this.handlePointerDown);
     this.canvas.addEventListener("pointermove", this.handlePointerMove);
@@ -319,7 +336,7 @@ export class InkCanvas {
     window.visualViewport?.removeEventListener("resize", this.positionTextEditor);
     window.visualViewport?.removeEventListener("scroll", this.positionTextEditor);
     window.removeEventListener("resize", this.positionTextEditor);
-    this.selectionLayer.remove();
+    this.selectionOverlay.destroy();
     this.shapeControls.remove();
     this.textEditorPortal.remove();
     this.liveCanvas.remove();
@@ -397,7 +414,12 @@ export class InkCanvas {
     if (this.selectionBounds && this.lassoPoints.length > 2) {
       const dimensions =
         viewport ?? this.currentViewport(this.canvas.getBoundingClientRect());
-      this.selectionOverlay.setSelection(this.lassoPoints, this.selectionBounds, dimensions);
+      this.selectionOverlay.setSelection(
+        this.lassoPoints,
+        this.selectionBounds,
+        dimensions,
+        this.canvas.getBoundingClientRect()
+      );
     }
     this.render();
   }
@@ -457,24 +479,122 @@ export class InkCanvas {
       return;
     }
     this.pushHistory(document);
-    const viewport = this.currentViewport(this.canvas.getBoundingClientRect());
-    const offsetX = 12 / Math.max(1, viewport.documentWidth);
-    const offsetY = 12 / Math.max(1, viewport.documentHeight);
     const duplicates = layer.strokes
       .filter((stroke) => this.selectedStrokeIds.has(stroke.id))
-      .map((stroke) => ({
-        ...stroke,
-        id: generateId(),
-        points: stroke.points.map((point) => ({
-          ...point,
-          x: Math.max(0, Math.min(1, point.x + offsetX)),
-          y: Math.max(0, Math.min(1, point.y + offsetY))
-        }))
-      }));
+      .map((stroke) => this.cloneStroke(stroke));
     layer.strokes.push(...duplicates);
     this.selectedStrokeIds = new Set(duplicates.map((stroke) => stroke.id));
     this.refreshSelectionBounds();
-    this.options.onDocumentChange(document);
+    this.options.onDocumentChange(document, false);
+  }
+
+  private copySelection(): void {
+    const snapshot = this.selectionSnapshot();
+    if (!snapshot) {
+      return;
+    }
+    InkCanvas.selectionClipboard = snapshot;
+    this.selectionOverlay.setPasteEnabled(true);
+    new Notice("已拷贝到插件剪贴板");
+  }
+
+  private cutSelection(): void {
+    const snapshot = this.selectionSnapshot();
+    if (!snapshot) {
+      return;
+    }
+    InkCanvas.selectionClipboard = snapshot;
+    this.selectionOverlay.setPasteEnabled(true);
+    this.deleteSelection();
+    new Notice("已剪切到插件剪贴板");
+  }
+
+  private pasteSelection(): void {
+    const clipboard = InkCanvas.selectionClipboard;
+    if (!clipboard || clipboard.strokes.length === 0) {
+      return;
+    }
+    const document = this.options.getDocument();
+    const layer = getActiveLayer(document);
+    const viewport = this.currentViewport(this.canvas.getBoundingClientRect());
+    const targetX = (viewport.offsetX + viewport.width / 2) / Math.max(1, viewport.documentWidth);
+    const targetY = (viewport.offsetY + viewport.height / 2) / Math.max(1, viewport.documentHeight);
+    const sourceX = (clipboard.bounds.minX + clipboard.bounds.maxX) / 2;
+    const sourceY = (clipboard.bounds.minY + clipboard.bounds.maxY) / 2;
+    const dx = Math.max(
+      -clipboard.bounds.minX,
+      Math.min(1 - clipboard.bounds.maxX, targetX - sourceX)
+    );
+    const dy = Math.max(
+      -clipboard.bounds.minY,
+      Math.min(1 - clipboard.bounds.maxY, targetY - sourceY)
+    );
+
+    this.pushHistory(document);
+    const pasted = clipboard.strokes.map((stroke) => ({
+      ...this.cloneStroke(stroke),
+      pageIndex: this.options.pageIndex,
+      points: stroke.points.map((point) => ({
+        ...point,
+        x: point.x + dx,
+        y: point.y + dy
+      }))
+    }));
+    layer.strokes.push(...pasted);
+    this.cancelSelection();
+    this.selectedLayerId = layer.id;
+    this.selectedStrokeIds = new Set(pasted.map((stroke) => stroke.id));
+    this.refreshSelectionBounds();
+    this.options.onActivate?.();
+    this.options.onRequestTool?.("select");
+    this.options.onDocumentChange(document, false);
+  }
+
+  private setSelectionColor(color: string): void {
+    if (this.selectedStrokeIds.size === 0) {
+      return;
+    }
+    const document = this.options.getDocument();
+    const layer = document.layers.find((item) => item.id === this.selectedLayerId);
+    if (!layer) {
+      return;
+    }
+    const selected = layer.strokes.filter((stroke) => this.selectedStrokeIds.has(stroke.id));
+    if (selected.length === 0 || selected.every((stroke) => stroke.color === color)) {
+      return;
+    }
+    this.pushHistory(document);
+    for (const stroke of selected) {
+      stroke.color = color;
+    }
+    this.render();
+    this.options.onDocumentChange(document, false);
+  }
+
+  private selectionSnapshot(): { strokes: AnnotationStroke[]; bounds: SelectionBounds } | null {
+    if (!this.selectionBounds || this.selectedStrokeIds.size === 0) {
+      return null;
+    }
+    const layer = this.options
+      .getDocument()
+      .layers.find((item) => item.id === this.selectedLayerId);
+    if (!layer) {
+      return null;
+    }
+    return {
+      strokes: layer.strokes
+        .filter((stroke) => this.selectedStrokeIds.has(stroke.id))
+        .map((stroke) => this.cloneStroke(stroke, false)),
+      bounds: { ...this.selectionBounds }
+    };
+  }
+
+  private cloneStroke(stroke: AnnotationStroke, generateNewId = true): AnnotationStroke {
+    return {
+      ...stroke,
+      id: generateNewId ? generateId() : stroke.id,
+      points: stroke.points.map((point) => ({ ...point }))
+    };
   }
 
   setSelectedTextColor(color: string): boolean {
@@ -637,7 +757,11 @@ export class InkCanvas {
     const textSizes = new Map<string, { fontSize: number; size: number }>();
     for (const stroke of layer.strokes) {
       if (this.selectedStrokeIds.has(stroke.id)) {
-        points.set(stroke.id, stroke.points.map((point) => ({ ...point })));
+        points.set(
+          stroke.id,
+          (stroke.tool === "text" ? this.textRectanglePoints(stroke) : stroke.points)
+            .map((point) => ({ ...point }))
+        );
         if (stroke.tool === "text") {
           textSizes.set(stroke.id, {
             fontSize: Math.max(8, stroke.fontSize ?? stroke.size ?? 24),
@@ -654,6 +778,7 @@ export class InkCanvas {
       bounds: { ...this.selectionBounds },
       points,
       textSizes,
+      startAngle: this.selectionPointerAngle(event, this.selectionBounds),
       changed: false
     };
     window.addEventListener("pointermove", this.handleSelectionTransformMove, {
@@ -673,20 +798,52 @@ export class InkCanvas {
     const viewport = this.currentViewport(this.canvas.getBoundingClientRect());
     const dx = (event.clientX - state.startX) / Math.max(1, viewport.documentWidth);
     const dy = (event.clientY - state.startY) / Math.max(1, viewport.documentHeight);
-    if (!state.changed && Math.hypot(dx, dy) < 0.0015) {
+    const angle = state.handle === "rotate"
+      ? this.selectionPointerAngle(event, state.bounds) - state.startAngle
+      : 0;
+    if (
+      !state.changed &&
+      Math.hypot(dx, dy) < 0.0015 &&
+      (state.handle !== "rotate" || Math.abs(angle) < 0.01)
+    ) {
       return;
     }
     if (!state.changed) {
       this.pushHistory(this.options.getDocument());
       state.changed = true;
     }
-    const next = this.transformedSelectionBounds(state.bounds, state.handle, dx, dy);
     const layer = this.options
       .getDocument()
       .layers.find((item) => item.id === this.selectedLayerId);
     if (!layer) {
       return;
     }
+    if (state.handle === "rotate") {
+      const centerX = ((state.bounds.minX + state.bounds.maxX) / 2) * viewport.documentWidth;
+      const centerY = ((state.bounds.minY + state.bounds.maxY) / 2) * viewport.documentHeight;
+      const cosine = Math.cos(angle);
+      const sine = Math.sin(angle);
+      for (const stroke of layer.strokes) {
+        const original = state.points.get(stroke.id);
+        if (!original) {
+          continue;
+        }
+        stroke.points = original.map((point) => {
+          const pointX = point.x * viewport.documentWidth - centerX;
+          const pointY = point.y * viewport.documentHeight - centerY;
+          return {
+            ...point,
+            x: (centerX + pointX * cosine - pointY * sine) / viewport.documentWidth,
+            y: (centerY + pointX * sine + pointY * cosine) / viewport.documentHeight
+          };
+        });
+        this.strokeBounds.delete(stroke);
+      }
+      this.refreshSelectionBounds();
+      this.render();
+      return;
+    }
+    const next = this.transformedSelectionBounds(state.bounds, state.handle, dx, dy);
     const originalWidth = Math.max(0.0001, state.bounds.maxX - state.bounds.minX);
     const originalHeight = Math.max(0.0001, state.bounds.maxY - state.bounds.minY);
     const nextWidth = next.maxX - next.minX;
@@ -715,8 +872,23 @@ export class InkCanvas {
     this.selectionBounds = next;
     this.lassoPoints = this.rectanglePoints(next);
     this.render();
-    this.selectionOverlay.setSelection(this.lassoPoints, next, viewport);
+    this.selectionOverlay.setSelection(
+      this.lassoPoints,
+      next,
+      viewport,
+      this.canvas.getBoundingClientRect()
+    );
   };
+
+  private selectionPointerAngle(event: PointerEvent, bounds: SelectionBounds): number {
+    const rect = this.canvas.getBoundingClientRect();
+    const viewport = this.currentViewport(rect);
+    const pointerX = event.clientX - rect.left + viewport.offsetX;
+    const pointerY = event.clientY - rect.top + viewport.offsetY;
+    const centerX = ((bounds.minX + bounds.maxX) / 2) * viewport.documentWidth;
+    const centerY = ((bounds.minY + bounds.maxY) / 2) * viewport.documentHeight;
+    return Math.atan2(pointerY - centerY, pointerX - centerX);
+  }
 
   private handleSelectionTransformEnd = (event: PointerEvent): void => {
     if (
@@ -789,7 +961,13 @@ export class InkCanvas {
     }
     this.lassoPoints = this.rectanglePoints(this.selectionBounds);
     const viewport = this.currentViewport(this.canvas.getBoundingClientRect());
-    this.selectionOverlay.setSelection(this.lassoPoints, this.selectionBounds, viewport);
+    this.selectionOverlay.setSelection(
+      this.lassoPoints,
+      this.selectionBounds,
+      viewport,
+      this.canvas.getBoundingClientRect()
+    );
+    this.selectionOverlay.setPasteEnabled(InkCanvas.selectionClipboard !== null);
   }
 
   private rectanglePoints(bounds: SelectionBounds): StrokePoint[] {
@@ -808,7 +986,13 @@ export class InkCanvas {
     this.selectionBounds = this.getStrokeBounds(stroke);
     this.lassoPoints = this.rectanglePoints(this.selectionBounds);
     const viewport = this.currentViewport(this.canvas.getBoundingClientRect());
-    this.selectionOverlay.setSelection(this.lassoPoints, this.selectionBounds, viewport);
+    this.selectionOverlay.setSelection(
+      this.lassoPoints,
+      this.selectionBounds,
+      viewport,
+      this.canvas.getBoundingClientRect()
+    );
+    this.selectionOverlay.setPasteEnabled(InkCanvas.selectionClipboard !== null);
     this.options.onActivate?.();
   }
 
@@ -892,7 +1076,13 @@ export class InkCanvas {
       { x: this.selectionBounds.minX, y: this.selectionBounds.maxY, pressure: 0.5 }
     ];
     const viewport = this.currentViewport(this.canvas.getBoundingClientRect());
-    this.selectionOverlay.setSelection(this.lassoPoints, this.selectionBounds, viewport);
+    this.selectionOverlay.setSelection(
+      this.lassoPoints,
+      this.selectionBounds,
+      viewport,
+      this.canvas.getBoundingClientRect()
+    );
+    this.selectionOverlay.setPasteEnabled(InkCanvas.selectionClipboard !== null);
   }
 
   resetHistory(): void {
@@ -1068,7 +1258,7 @@ export class InkCanvas {
     this.drawLiveStroke();
     this.refreshShapeOverlay();
     if (this.selectionBounds && this.lassoPoints.length > 2) {
-      this.selectionOverlay.setSelection(this.lassoPoints, this.selectionBounds, viewport);
+      this.selectionOverlay.setSelection(this.lassoPoints, this.selectionBounds, viewport, rect);
     }
     this.positionTextEditor();
   }
@@ -1248,11 +1438,28 @@ export class InkCanvas {
     context.textBaseline = "top";
     const lineHeight = fontSize * 1.25;
     const end = stroke.points[1];
+    const rotated = stroke.points.length >= 4 && end;
     const maxWidth = end
-      ? Math.max(fontSize, Math.abs(end.x - start.x) * viewport.documentWidth)
+      ? Math.max(
+          fontSize,
+          rotated
+            ? Math.hypot(
+                (end.x - start.x) * viewport.documentWidth,
+                (end.y - start.y) * viewport.documentHeight
+              )
+            : Math.abs(end.x - start.x) * viewport.documentWidth
+        )
       : Number.POSITIVE_INFINITY;
+    if (rotated) {
+      const angle = Math.atan2(
+        (end.y - start.y) * viewport.documentHeight,
+        (end.x - start.x) * viewport.documentWidth
+      );
+      context.translate(x, y);
+      context.rotate(angle);
+    }
     this.wrapCanvasText(context, stroke.text, maxWidth).forEach((line, index) => {
-      context.fillText(line, x, y + index * lineHeight);
+      context.fillText(line, rotated ? 0 : x, (rotated ? 0 : y) + index * lineHeight);
     });
   }
 
@@ -1305,11 +1512,7 @@ export class InkCanvas {
   ): void {
     const viewport = this.activeViewport ?? this.currentViewport(this.canvas.getBoundingClientRect());
     const end = tool === "text"
-      ? {
-          ...point,
-          x: Math.min(1, point.x + 180 / Math.max(1, viewport.documentWidth)),
-          y: Math.min(1, point.y + 60 / Math.max(1, viewport.documentHeight))
-        }
+      ? this.defaultTextEnd(point, viewport)
       : { ...point };
     this.activeStrokeIndex = layer.strokes.length;
     this.activeStroke = {
@@ -1321,10 +1524,10 @@ export class InkCanvas {
       points:
         tool === "shape"
           ? this.shapePoints(point, end, this.options.getShapeKind?.() ?? "rectangle")
-          : [{ ...point }, end],
+          : this.rectanglePoints(this.boundsForPoints([point, end])),
       pageIndex: this.options.pageIndex,
       shape: tool === "shape" ? this.options.getShapeKind?.() ?? "rectangle" : undefined,
-      text: tool === "text" ? "文本" : undefined,
+      text: tool === "text" ? "" : undefined,
       fontSize: tool === "text" ? this.options.getSize() : undefined
     };
     this.activeStrokeLayerId = layer.id;
@@ -1348,7 +1551,12 @@ export class InkCanvas {
     if (stroke.tool === "shape") {
       stroke.points = this.shapePoints(start, point, stroke.shape ?? "rectangle");
     } else if (stroke.tool === "text") {
-      stroke.points = [start, point];
+      const dx = Math.abs(point.x - start.x) * this.activeViewport.documentWidth;
+      const dy = Math.abs(point.y - start.y) * this.activeViewport.documentHeight;
+      const end = dx < 8 && dy < 8
+        ? this.defaultTextEnd(start, this.activeViewport)
+        : point;
+      stroke.points = this.rectanglePoints(this.boundsForPoints([start, end]));
     }
     this.strokeBounds.delete(stroke);
     this.render();
@@ -1416,6 +1624,23 @@ export class InkCanvas {
         point.y <= bounds.maxY + paddingY
       ) {
         return stroke;
+      }
+    }
+    return null;
+  }
+
+  private findTextAtPoint(
+    document: AnnotationDocument,
+    point: StrokePoint
+  ): { layer: AnnotationLayer; stroke: AnnotationStroke } | null {
+    for (let index = document.layers.length - 1; index >= 0; index -= 1) {
+      const layer = document.layers[index];
+      if (!layer.visible || layer.opacity <= 0 || layer.whiteboard) {
+        continue;
+      }
+      const stroke = this.findObjectAtPoint(layer, point, "text");
+      if (stroke) {
+        return { layer, stroke };
       }
     }
     return null;
@@ -1524,6 +1749,8 @@ export class InkCanvas {
     if (!layer || !stroke || stroke.tool !== "text") {
       return;
     }
+    this.selectTextStroke(layer, stroke);
+    this.selectionOverlay.hideMenu();
     if (!created) {
       this.pushHistory(this.options.getDocument());
     }
@@ -1539,7 +1766,7 @@ export class InkCanvas {
         points: stroke.points.map((point) => ({ ...point }))
       }
     };
-    this.textEditor.value = stroke.text ?? "文本";
+    this.textEditor.value = stroke.text ?? "";
     this.textEditor.style.color = stroke.color;
     this.textEditor.style.fontSize = `${stroke.fontSize ?? stroke.size}px`;
     document.body.append(this.textEditorPortal);
@@ -1580,16 +1807,38 @@ export class InkCanvas {
   };
 
   private commitTextEditor = (): void => {
-    if (!this.editingText) {
+    const editing = this.editingText;
+    if (!editing) {
       return;
     }
-    const stroke = this.currentTextStroke();
-    if (stroke) {
-      stroke.text = this.textEditor.value || "文本";
-      this.strokeBounds.delete(stroke);
+    const document = this.options.getDocument();
+    const layer = document.layers.find((candidate) => candidate.id === editing.layerId);
+    const strokeIndex = layer?.strokes.findIndex((candidate) => candidate.id === editing.strokeId) ?? -1;
+    const stroke = strokeIndex >= 0 ? layer?.strokes[strokeIndex] : null;
+    if (!layer || !stroke) {
+      this.hideTextEditor();
+      return;
     }
+    if (!this.textEditor.value.trim()) {
+      layer.strokes.splice(strokeIndex, 1);
+      if (editing.created) {
+        const history = this.undoStack[this.undoStack.length - 1];
+        if (history?.kind === "stroke-add" && history.stroke.id === editing.strokeId) {
+          this.undoStack.pop();
+        }
+      }
+      this.hideTextEditor();
+      this.cancelSelection();
+      this.options.onDocumentChange(document, false);
+      this.render();
+      return;
+    }
+    stroke.text = this.textEditor.value;
+    this.strokeBounds.delete(stroke);
     this.hideTextEditor();
-    this.options.onDocumentChange(this.options.getDocument(), false);
+    this.options.onRequestTool?.("select");
+    this.selectTextStroke(layer, stroke);
+    this.options.onDocumentChange(document, false);
     this.render();
   };
 
@@ -1622,8 +1871,29 @@ export class InkCanvas {
       }
     }
     this.hideTextEditor();
+    if (layer && stroke && !editing.created) {
+      this.options.onRequestTool?.("select");
+      this.selectTextStroke(layer, stroke);
+    } else {
+      this.cancelSelection();
+    }
     this.options.onDocumentChange(this.options.getDocument(), false);
     this.render();
+  }
+
+  private textRectanglePoints(stroke: AnnotationStroke): StrokePoint[] {
+    if (stroke.points.length >= 4) {
+      return stroke.points;
+    }
+    return this.rectanglePoints(this.boundsForPoints(stroke.points));
+  }
+
+  private defaultTextEnd(start: StrokePoint, viewport: InkCanvasViewport): StrokePoint {
+    return {
+      ...start,
+      x: Math.min(1, start.x + 180 / Math.max(1, viewport.documentWidth)),
+      y: Math.min(1, start.y + 60 / Math.max(1, viewport.documentHeight))
+    };
   }
 
   private closeTextEditor(): void {
@@ -1654,6 +1924,7 @@ export class InkCanvas {
     if (!this.editingText || !this.textEditorPortal.classList.contains("is-visible")) {
       return;
     }
+    this.selectionOverlay.hideMenu();
     const lock = this.textEditorScrollLock;
     if (lock?.target) {
       lock.target.scrollLeft = lock.scrollLeft;
@@ -1753,12 +2024,11 @@ export class InkCanvas {
       this.panVelocityX = 0;
       this.panVelocityY = 0;
       const document = this.options.getDocument();
-      const layer = getActiveLayer(document);
       const rect = this.cachedRect ?? this.canvas.getBoundingClientRect();
       const point = this.pointFromEvent(event, rect, this.currentViewport(rect));
-      const text = this.findObjectAtPoint(layer, point, "text");
+      const text = this.findTextAtPoint(document, point);
       if (text) {
-        this.startTextLongPress(event, layer, text, "touch-pan");
+        this.startTextLongPress(event, text.layer, text.stroke, "touch-pan");
       }
       return;
     }
@@ -1824,13 +2094,13 @@ export class InkCanvas {
     }
 
     if (tool === "text") {
-      const existing = this.findObjectAtPoint(layer, point, "text");
+      const existing = this.findTextAtPoint(document, point);
       if (existing) {
         if (event.pointerType === "pen") {
-          this.startTextLongPress(event, layer, existing, "pen-text");
+          this.startTextLongPress(event, existing.layer, existing.stroke, "pen-text");
           return;
         }
-        this.openTextEditor(layer.id, existing.id);
+        this.openTextEditor(existing.layer.id, existing.stroke.id);
         this.resetPointerState();
         this.resumePendingDocumentPublish();
         return;
@@ -1853,9 +2123,9 @@ export class InkCanvas {
       this.lassoPoints = [point];
       this.updateLassoDraft();
       if (event.pointerType === "pen") {
-        const text = this.findObjectAtPoint(layer, point, "text");
+        const text = this.findTextAtPoint(document, point);
         if (text) {
-          this.startTextLongPress(event, layer, text, "pen-select");
+          this.startTextLongPress(event, text.layer, text.stroke, "pen-select");
         }
       }
       return;
@@ -3160,7 +3430,11 @@ export class InkCanvas {
   private updateLassoDraft(): void {
     const viewport =
       this.activeViewport ?? this.currentViewport(this.canvas.getBoundingClientRect());
-    this.selectionOverlay.setDraft(this.lassoPoints, viewport);
+    this.selectionOverlay.setDraft(
+      this.lassoPoints,
+      viewport,
+      this.canvas.getBoundingClientRect()
+    );
   }
 
   private finalizeLasso(): void {
@@ -3199,10 +3473,18 @@ export class InkCanvas {
 
     if (!selectedBounds || this.selectedStrokeIds.size === 0) {
       this.cancelSelection();
+      new Notice("未选中内容");
       return;
     }
     this.selectionBounds = selectedBounds;
-    this.selectionOverlay.setSelection(this.lassoPoints, selectedBounds, viewport);
+    this.lassoPoints = this.rectanglePoints(selectedBounds);
+    this.selectionOverlay.setSelection(
+      this.lassoPoints,
+      selectedBounds,
+      viewport,
+      this.canvas.getBoundingClientRect()
+    );
+    this.selectionOverlay.setPasteEnabled(InkCanvas.selectionClipboard !== null);
   }
 
   private strokeTouchesLasso(

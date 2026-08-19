@@ -176,12 +176,12 @@ export class MarkdownAnnotationView extends ItemView {
         this.scrollContainer.scrollLeft += deltaX;
         this.scrollContainer.scrollTop += deltaY;
       },
-      onPencilShortcut: () => this.togglePenAndEraser()
+      onPencilShortcut: () => this.togglePenAndEraser(),
+      onRequestTool: (tool) => this.setTool(tool)
     });
     this.surface.append(
       this.inkCanvas.canvas,
       this.inkCanvas.liveCanvas,
-      this.inkCanvas.selectionLayer,
       this.inkCanvas.shapeControls
     );
     if (typeof ResizeObserver !== "undefined") {
@@ -545,7 +545,8 @@ export class MarkdownAnnotationView extends ItemView {
       onChange: (draft) => this.updateWhiteboardDraft(draft),
       onSave: (layer, draft) => this.saveWhiteboardLayer(layer, draft.id),
       onDelete: () => this.deleteWhiteboard(),
-      onPencilShortcut: () => this.togglePenAndEraser()
+      onPencilShortcut: () => this.togglePenAndEraser(),
+      onRequestTool: (tool) => this.setTool(tool)
     });
     this.activeInkTarget = "whiteboard";
     this.annotationToolbar?.setWhiteboardActive(true);
@@ -599,7 +600,8 @@ export class MarkdownAnnotationView extends ItemView {
       onSave: (nextLayer, nextDraft) =>
         this.saveWhiteboardLayer(nextLayer, nextDraft.id),
       onDelete: () => this.deleteWhiteboard(),
-      onPencilShortcut: () => this.togglePenAndEraser()
+      onPencilShortcut: () => this.togglePenAndEraser(),
+      onRequestTool: (tool) => this.setTool(tool)
     });
     this.activeInkTarget = "whiteboard";
     this.annotationToolbar?.setWhiteboardActive(true);

@@ -486,6 +486,7 @@ export class PdfAnnotationView extends ItemView {
         this.scrollContainer.scrollTop += deltaY;
       },
       onPencilShortcut: () => this.togglePenAndEraser(),
+      onRequestTool: (tool) => this.setTool(tool),
       pageIndex
     });
     const history = this.pageHistories.get(pageIndex);
@@ -496,7 +497,6 @@ export class PdfAnnotationView extends ItemView {
     pageEl.append(
       inkCanvas.canvas,
       inkCanvas.liveCanvas,
-      inkCanvas.selectionLayer,
       inkCanvas.shapeControls
     );
     inkCanvas.render();
@@ -729,7 +729,8 @@ export class PdfAnnotationView extends ItemView {
       onChange: (draft) => this.updateWhiteboardDraft(draft),
       onSave: (layer, draft) => this.saveWhiteboardLayer(layer, draft.id),
       onDelete: () => this.deleteWhiteboard(),
-      onPencilShortcut: () => this.togglePenAndEraser()
+      onPencilShortcut: () => this.togglePenAndEraser(),
+      onRequestTool: (tool) => this.setTool(tool)
     });
     this.activeInkTarget = "whiteboard";
     this.annotationToolbar?.setWhiteboardActive(true);
@@ -794,7 +795,8 @@ export class PdfAnnotationView extends ItemView {
       onSave: (nextLayer, nextDraft) =>
         this.saveWhiteboardLayer(nextLayer, nextDraft.id),
       onDelete: () => this.deleteWhiteboard(),
-      onPencilShortcut: () => this.togglePenAndEraser()
+      onPencilShortcut: () => this.togglePenAndEraser(),
+      onRequestTool: (tool) => this.setTool(tool)
     });
     this.activeInkTarget = "whiteboard";
     this.annotationToolbar?.setWhiteboardActive(true);

@@ -35,6 +35,7 @@ export interface TemporaryWhiteboardOptions {
   onSave?: (layer: AnnotationLayer, draft: WhiteboardDraft) => void;
   onDelete: () => void;
   onPencilShortcut?: () => void;
+  onRequestTool?: (tool: AnnotationTool) => void;
 }
 
 export function draftFromWhiteboardLayer(
@@ -162,12 +163,12 @@ export class TemporaryWhiteboard {
         options.onActivate();
         this.panBy(deltaX, deltaY);
       },
-      onPencilShortcut: options.onPencilShortcut
+      onPencilShortcut: options.onPencilShortcut,
+      onRequestTool: options.onRequestTool
     });
     this.innerSurface.append(
       this.inkCanvas.canvas,
       this.inkCanvas.liveCanvas,
-      this.inkCanvas.selectionLayer,
       this.inkCanvas.shapeControls
     );
     this.applyBounds();

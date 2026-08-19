@@ -221,12 +221,10 @@
 }
 
 .hand-note-selection-layer {
-  height: 100%;
   overflow: visible;
   pointer-events: none;
-  position: absolute;
-  width: 100%;
-  z-index: 4;
+  position: fixed;
+  z-index: 1001;
 }
 
 .hand-note-selection-layer:not(.is-visible) {
@@ -244,15 +242,14 @@
 
 .hand-note-selection-path,
 .hand-note-selection-bounds {
-  fill: rgba(37, 99, 235, 0.08);
+  fill: color-mix(in srgb, var(--interactive-accent) 14%, transparent);
   stroke: var(--interactive-accent);
-  stroke-dasharray: 7 5;
-  stroke-width: 2;
+  stroke-width: 2.5;
   vector-effect: non-scaling-stroke;
 }
 
-.hand-note-selection-bounds {
-  fill: transparent;
+.hand-note-selection-path {
+  stroke-dasharray: 7 5;
 }
 
 .hand-note-selection-menu {
@@ -262,10 +259,13 @@
   border-radius: 6px;
   box-shadow: var(--shadow-s);
   display: none;
+  flex-wrap: wrap;
   gap: 2px;
+  max-width: calc(100% - 16px);
   padding: 3px;
   pointer-events: auto;
   position: absolute;
+  width: 292px;
   z-index: 6;
 }
 
@@ -274,7 +274,7 @@
 }
 
 .hand-note-selection-transform {
-  border: 1px dashed var(--interactive-accent);
+  border: 2px solid var(--interactive-accent);
   box-sizing: border-box;
   cursor: move;
   display: none;
@@ -288,6 +288,10 @@
   display: block;
 }
 
+.hand-note-selection-transform.is-emphasized {
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--interactive-accent) 24%, transparent);
+}
+
 .hand-note-selection-transform::before {
   content: "";
   inset: -22px;
@@ -298,45 +302,80 @@
   background: var(--interactive-accent);
   border: 2px solid var(--background-primary);
   border-radius: 50%;
-  height: 14px;
+  box-shadow: 0 0 0 1px var(--interactive-accent), var(--shadow-s);
+  height: 16px;
   padding: 0;
   position: absolute;
   touch-action: none;
-  width: 14px;
+  width: 16px;
 }
 
 .hand-note-selection-handle.is-nw,
 .hand-note-selection-handle.is-w,
 .hand-note-selection-handle.is-sw {
-  left: -7px;
+  left: -8px;
 }
 
 .hand-note-selection-handle.is-ne,
 .hand-note-selection-handle.is-e,
 .hand-note-selection-handle.is-se {
-  right: -7px;
+  right: -8px;
 }
 
 .hand-note-selection-handle.is-n,
 .hand-note-selection-handle.is-s {
-  left: calc(50% - 7px);
+  left: calc(50% - 8px);
 }
 
 .hand-note-selection-handle.is-w,
 .hand-note-selection-handle.is-e {
-  top: calc(50% - 7px);
+  top: calc(50% - 8px);
 }
 
 .hand-note-selection-handle.is-nw,
 .hand-note-selection-handle.is-n,
 .hand-note-selection-handle.is-ne {
-  top: -7px;
+  top: -8px;
 }
 
 .hand-note-selection-handle.is-sw,
 .hand-note-selection-handle.is-s,
 .hand-note-selection-handle.is-se {
-  bottom: -7px;
+  bottom: -8px;
+}
+
+.hand-note-selection-handle.is-rotate {
+  align-items: center;
+  display: flex;
+  height: 24px;
+  justify-content: center;
+  left: calc(50% - 12px);
+  top: -42px;
+  width: 24px;
+}
+
+.hand-note-selection-handle.is-rotate::before {
+  background: var(--interactive-accent);
+  content: "";
+  height: 18px;
+  left: 10px;
+  pointer-events: none;
+  position: absolute;
+  top: 22px;
+  width: 2px;
+}
+
+.hand-note-selection-handle.is-rotate svg {
+  height: 14px;
+  width: 14px;
+}
+
+.hand-note-selection-color-input {
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+  position: absolute;
+  width: 0;
 }
 
 .hand-note-whiteboard {
@@ -674,19 +713,30 @@
 
 .hand-note-text-editor-portal {
   background: var(--background-primary);
-  border: 1px solid var(--interactive-accent);
+  border: 3px solid var(--interactive-accent);
   border-radius: 6px;
   box-sizing: border-box;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.32), 0 0 0 2px var(--background-primary);
   display: none;
   flex-direction: column;
   gap: 6px;
   padding: 6px;
   position: fixed;
-  z-index: 1000;
+  z-index: 1100;
 }
 
 .hand-note-text-editor-portal.is-visible {
   display: flex;
+}
+
+.hand-note-text-editor-header {
+  align-items: center;
+  color: var(--text-normal);
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: space-between;
+  min-height: 32px;
+  padding-left: 6px;
 }
 
 .hand-note-text-editor-actions {
@@ -697,8 +747,9 @@
 }
 
 .hand-note-text-editor {
-  background: var(--background-primary);
-  border: 0;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border-hover);
+  border-radius: 4px;
   box-sizing: border-box;
   display: block;
   flex: 1 1 auto;
@@ -707,10 +758,15 @@
   min-height: 0;
   min-width: 0;
   outline: none;
-  padding: 5px;
+  padding: 10px;
   resize: none;
   touch-action: manipulation;
   width: 100%;
+}
+
+.hand-note-text-editor::placeholder {
+  color: var(--text-muted);
+  opacity: 1;
 }
 
 .hand-note-layer-footer {
