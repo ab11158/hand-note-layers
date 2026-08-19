@@ -129,6 +129,9 @@ export function getActiveLayer(document: AnnotationDocument): AnnotationLayer {
   );
   if (active) {
     active.visible = true;
+    if (active.opacity <= 0) {
+      active.opacity = active.lastNonZeroOpacity ?? 1;
+    }
     return active;
   }
 
@@ -138,6 +141,9 @@ export function getActiveLayer(document: AnnotationDocument): AnnotationLayer {
     document.layers.push(editable);
   }
   editable.visible = true;
+  if (editable.opacity <= 0) {
+    editable.opacity = editable.lastNonZeroOpacity ?? 1;
+  }
   document.activeLayerId = editable.id;
   return editable;
 }

@@ -181,9 +181,7 @@ export class MarkdownAnnotationView extends ItemView {
     this.surface.append(
       this.inkCanvas.canvas,
       this.inkCanvas.liveCanvas,
-      this.inkCanvas.selectionOutline,
-      this.inkCanvas.selectionTransform,
-      this.inkCanvas.selectionMenu,
+      this.inkCanvas.selectionLayer,
       this.inkCanvas.shapeControls
     );
     if (typeof ResizeObserver !== "undefined") {
@@ -320,6 +318,7 @@ export class MarkdownAnnotationView extends ItemView {
   private setColor(color: string): void {
     this.currentColor = color;
     this.annotationToolbar?.setColor(color);
+    this.currentInkCanvas()?.setSelectedTextColor(color);
   }
 
   togglePenAndEraser(): void {

@@ -1,5 +1,6 @@
 import { setIcon } from "obsidian";
 import { StrokePoint } from "../model/annotation";
+import type { InkCanvasViewport } from "./ink-canvas";
 
 export interface SelectionBounds {
   minX: number;
@@ -9,6 +10,7 @@ export interface SelectionBounds {
 }
 
 export class SelectionOverlay {
+  readonly element: HTMLDivElement;
   readonly outline: SVGSVGElement;
   readonly menu: HTMLDivElement;
   readonly transformBox: HTMLDivElement;
@@ -19,8 +21,12 @@ export class SelectionOverlay {
     onDelete: () => void,
     onCancel: () => void,
     onDuplicate: () => void,
+    onScreenshot: () => void,
     onTransformStart: (event: PointerEvent, handle: string) => void
   ) {
+    this.element = document.createElement("div");
+    this.element.className = "hand-note-selection-layer";
+
     const namespace = "http://www.w3.org/2000/svg";
     this.outline = document.createElementNS(namespace, "svg");
     this.outline.classList.add("hand-note-selection-overlay");
@@ -35,50 +41,46 @@ export class SelectionOverlay {
     this.menu = document.createElement("div");
     this.menu.className = "hand-note-selection-menu";
 
+    const moveButton = this.createButton("move", "移动选区");
+    moveButton.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      onTransformStart(event, "move");
+    });
+    const scaleButton = this.createButton("maximize-2", "缩放选区");
+    scaleButton.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      onTransformStart(event, "se");
+    });
+    const screenshotButton = this.createButton("camera", "截屏选区");
+    screenshotButton.addEventListener("click", onScreenshot);
     const duplicateButton = this.createButton("copy", "复制选中内容");
     duplicateButton.addEventListener("click", onDuplicate);
     const deleteButton = this.createButton("trash-2", "删除选中内容");
     deleteButton.addEventListener("click", onDelete);
     const cancelButton = this.createButton("x", "取消选择");
     cancelButton.addEventListener("click", onCancel);
-    this.menu.append(duplicateButton, deleteButton, cancelButton);
+    this.menu.append(
+      moveButton,
+      scaleButton,
+      screenshotButton,
+      duplicateButton,
+      deleteButton,
+      cancelButton
+    );
 
     this.transformBox = document.createElement("div");
     this.transformBox.className = "hand-note-selection-transform";
     this.transformBox.setAttribute("aria-label", "移动或缩放选区");
-    let longPressTimer: number | null = null;
-    let startX = 0;
-    let startY = 0;
-    const cancelLongPress = () => {
-      if (longPressTimer !== null) {
-        window.clearTimeout(longPressTimer);
-        longPressTimer = null;
-      }
-    };
     this.transformBox.addEventListener("pointerdown", (event) => {
       if (event.target !== this.transformBox) {
         return;
       }
       event.preventDefault();
       event.stopPropagation();
-      startX = event.clientX;
-      startY = event.clientY;
-      if (event.pointerType === "touch") {
-        cancelLongPress();
-        longPressTimer = window.setTimeout(() => {
-          longPressTimer = null;
-          this.menu.classList.add("is-visible");
-        }, 420);
-      }
       onTransformStart(event, "move");
     });
-    this.transformBox.addEventListener("pointermove", (event) => {
-      if (Math.hypot(event.clientX - startX, event.clientY - startY) > 8) {
-        cancelLongPress();
-      }
-    });
-    this.transformBox.addEventListener("pointerup", cancelLongPress);
-    this.transformBox.addEventListener("pointercancel", cancelLongPress);
     for (const handle of ["nw", "n", "ne", "e", "se", "s", "sw", "w"]) {
       const button = document.createElement("button");
       button.type = "button";
@@ -87,17 +89,17 @@ export class SelectionOverlay {
       button.addEventListener("pointerdown", (event) => {
         event.preventDefault();
         event.stopPropagation();
-        this.menu.classList.remove("is-visible");
         onTransformStart(event, handle);
       });
       this.transformBox.append(button);
     }
+    this.element.append(this.outline, this.transformBox, this.menu);
     this.clear();
   }
 
-  setDraft(points: StrokePoint[], documentWidth: number, documentHeight: number): void {
-    this.prepare(documentWidth, documentHeight);
-    this.path.setAttribute("d", this.pathData(points, documentWidth, documentHeight, false));
+  setDraft(points: StrokePoint[], viewport: InkCanvasViewport): void {
+    this.prepare(viewport);
+    this.path.setAttribute("d", this.pathData(points, viewport, false));
     this.bounds.setAttribute("visibility", "hidden");
     this.menu.classList.remove("is-visible");
   }
@@ -105,27 +107,36 @@ export class SelectionOverlay {
   setSelection(
     points: StrokePoint[],
     selectionBounds: SelectionBounds,
-    documentWidth: number,
-    documentHeight: number
+    viewport: InkCanvasViewport
   ): void {
-    this.prepare(documentWidth, documentHeight);
-    this.path.setAttribute("d", this.pathData(points, documentWidth, documentHeight, true));
+    this.prepare(viewport);
+    this.path.setAttribute("d", this.pathData(points, viewport, true));
 
-    const left = selectionBounds.minX * documentWidth;
-    const top = selectionBounds.minY * documentHeight;
-    const width = Math.max(1, (selectionBounds.maxX - selectionBounds.minX) * documentWidth);
-    const height = Math.max(1, (selectionBounds.maxY - selectionBounds.minY) * documentHeight);
+    const left = selectionBounds.minX * viewport.documentWidth - viewport.offsetX;
+    const top = selectionBounds.minY * viewport.documentHeight - viewport.offsetY;
+    const width = Math.max(
+      1,
+      (selectionBounds.maxX - selectionBounds.minX) * viewport.documentWidth
+    );
+    const height = Math.max(
+      1,
+      (selectionBounds.maxY - selectionBounds.minY) * viewport.documentHeight
+    );
     this.bounds.setAttribute("x", String(left));
     this.bounds.setAttribute("y", String(top));
     this.bounds.setAttribute("width", String(width));
     this.bounds.setAttribute("height", String(height));
     this.bounds.setAttribute("visibility", "visible");
 
-    const menuWidth = 118;
-    const menuLeft = Math.max(8, Math.min(documentWidth - menuWidth - 8, left + width - menuWidth));
-    const menuTop = Math.max(8, top - 44);
+    const menuWidth = Math.min(240, Math.max(0, viewport.width - 16));
+    const menuLeft = Math.max(
+      8,
+      Math.min(viewport.width - menuWidth - 8, left + width - menuWidth)
+    );
+    const menuTop = top >= 52 ? top - 44 : Math.min(viewport.height - 44, top + height + 8);
     this.menu.style.left = `${menuLeft}px`;
-    this.menu.style.top = `${menuTop}px`;
+    this.menu.style.top = `${Math.max(8, menuTop)}px`;
+    this.menu.classList.add("is-visible");
     this.transformBox.style.left = `${left}px`;
     this.transformBox.style.top = `${top}px`;
     this.transformBox.style.width = `${width}px`;
@@ -136,23 +147,26 @@ export class SelectionOverlay {
   clear(): void {
     this.path.setAttribute("d", "");
     this.bounds.setAttribute("visibility", "hidden");
-    this.outline.classList.remove("is-visible");
+    this.element.classList.remove("is-visible");
     this.menu.classList.remove("is-visible");
     this.transformBox.classList.remove("is-visible");
   }
 
-  private prepare(documentWidth: number, documentHeight: number): void {
+  private prepare(viewport: InkCanvasViewport): void {
+    this.element.style.left = `${viewport.offsetX}px`;
+    this.element.style.top = `${viewport.offsetY}px`;
+    this.element.style.width = `${viewport.width}px`;
+    this.element.style.height = `${viewport.height}px`;
     this.outline.setAttribute(
       "viewBox",
-      `0 0 ${Math.max(1, documentWidth)} ${Math.max(1, documentHeight)}`
+      `0 0 ${Math.max(1, viewport.width)} ${Math.max(1, viewport.height)}`
     );
-    this.outline.classList.add("is-visible");
+    this.element.classList.add("is-visible");
   }
 
   private pathData(
     points: StrokePoint[],
-    documentWidth: number,
-    documentHeight: number,
+    viewport: InkCanvasViewport,
     close: boolean
   ): string {
     if (points.length === 0) {
@@ -160,7 +174,9 @@ export class SelectionOverlay {
     }
     const commands = points.map((point, index) => {
       const command = index === 0 ? "M" : "L";
-      return `${command}${point.x * documentWidth} ${point.y * documentHeight}`;
+      const x = point.x * viewport.documentWidth - viewport.offsetX;
+      const y = point.y * viewport.documentHeight - viewport.offsetY;
+      return `${command}${x} ${y}`;
     });
     if (close && points.length > 2) {
       commands.push("Z");

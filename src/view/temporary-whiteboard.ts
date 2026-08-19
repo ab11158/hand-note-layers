@@ -167,9 +167,7 @@ export class TemporaryWhiteboard {
     this.innerSurface.append(
       this.inkCanvas.canvas,
       this.inkCanvas.liveCanvas,
-      this.inkCanvas.selectionOutline,
-      this.inkCanvas.selectionTransform,
-      this.inkCanvas.selectionMenu,
+      this.inkCanvas.selectionLayer,
       this.inkCanvas.shapeControls
     );
     this.applyBounds();

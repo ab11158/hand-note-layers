@@ -496,9 +496,7 @@ export class PdfAnnotationView extends ItemView {
     pageEl.append(
       inkCanvas.canvas,
       inkCanvas.liveCanvas,
-      inkCanvas.selectionOutline,
-      inkCanvas.selectionTransform,
-      inkCanvas.selectionMenu,
+      inkCanvas.selectionLayer,
       inkCanvas.shapeControls
     );
     inkCanvas.render();
@@ -667,6 +665,7 @@ export class PdfAnnotationView extends ItemView {
   private setColor(color: string): void {
     this.currentColor = color;
     this.annotationToolbar?.setColor(color);
+    this.currentInkCanvas()?.setSelectedTextColor(color);
   }
 
   private async toggleWhiteboard(): Promise<void> {
