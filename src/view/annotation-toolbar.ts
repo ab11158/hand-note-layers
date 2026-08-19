@@ -46,7 +46,8 @@ export interface AnnotationToolbarOptions {
   onRedo: () => void;
   onClear: () => void;
   onSave: () => void;
-  onExport?: (mode: "pdf" | "layers") => void;
+  onExport?: (mode: "document" | "layers") => void;
+  exportPrimaryLabel?: string;
   onLayers: () => void;
   navigationControls?: HTMLElement[];
 }
@@ -147,12 +148,12 @@ export class AnnotationToolbar {
       this.createShapeKindButton("line", "直线与折线", "minus"),
       this.createShapeKindButton("rectangle", "矩形", "square"),
       this.createShapeKindButton("ellipse", "椭圆", "circle"),
-      this.createShapeKindButton("curve", "光滑曲线", "spline"),
-      this.createShapeKindButton("connector-straight", "直线连接器", "move-right"),
+      this.createShapeKindButton("curve", "光滑曲线", "activity"),
+      this.createShapeKindButton("connector-straight", "直线连接器", "arrow-right"),
       this.createShapeKindButton("connector-elbow", "直角连接器", "corner-down-right"),
-      this.createShapeKindButton("connector-curve", "曲线连接器", "git-commit-horizontal"),
+      this.createShapeKindButton("connector-curve", "曲线连接器", "git-branch"),
       this.createShapeLineStyleButton("solid", "实线", "minus"),
-      this.createShapeLineStyleButton("dashed", "虚线", "ellipsis"),
+      this.createShapeLineStyleButton("dashed", "虚线", "more-horizontal"),
       this.createShapeLineStyleButton("dotted", "点线", "more-horizontal"),
       this.shapeStartArrowButton,
       this.shapeEndArrowButton,
@@ -297,8 +298,8 @@ export class AnnotationToolbar {
       const exportMenu = document.createElement("div");
       exportMenu.className = "hand-note-eraser-menu hand-note-export-menu";
       exportMenu.append(
-        this.createExportButton("file-down", "合成 PDF", () =>
-          options.onExport?.("pdf")
+        this.createExportButton("file-down", options.exportPrimaryLabel ?? "导出当前文件", () =>
+          options.onExport?.("document")
         ),
         this.createExportButton("package", "导出图层包 ZIP", () =>
           options.onExport?.("layers")
@@ -461,6 +462,9 @@ export class AnnotationToolbar {
       button,
       `${position === "start" ? "起点" : "终点"}端点：${this.shapeArrowLabel(arrow)}`
     );
+    const text = document.createElement("span");
+    text.textContent = `${position === "start" ? "起点" : "终点"}：${this.shapeArrowLabel(arrow)}`;
+    button.append(text);
   }
 
   setShapeFillEnabled(enabled: boolean): void {
@@ -468,6 +472,10 @@ export class AnnotationToolbar {
     this.shapeFillButton.classList.toggle("is-active", enabled);
     this.shapeFillButton.setAttribute("aria-pressed", String(enabled));
     setControlTooltip(this.shapeFillButton, enabled ? "关闭图形填充" : "启用图形填充");
+    const text = this.shapeFillButton.querySelector("span");
+    if (text) {
+      text.textContent = enabled ? "取消填充" : "填充";
+    }
   }
 
   setPasteEnabled(enabled: boolean): void {
@@ -619,6 +627,9 @@ export class AnnotationToolbar {
     button.type = "button";
     button.className = "hand-note-eraser-option";
     setIcon(button, "paint-bucket");
+    const text = document.createElement("span");
+    text.textContent = "填充";
+    button.append(text);
     button.addEventListener("click", (event) => {
       event.stopPropagation();
       this.options.onShapeFillChange(!this.shapeFillEnabled);
@@ -667,10 +678,10 @@ export class AnnotationToolbar {
       polyline: "route",
       rectangle: "square",
       ellipse: "circle",
-      curve: "spline",
-      "connector-straight": "move-right",
+      curve: "activity",
+      "connector-straight": "arrow-right",
       "connector-elbow": "corner-down-right",
-      "connector-curve": "git-commit-horizontal"
+      "connector-curve": "git-branch"
     }[kind];
   }
 
@@ -766,12 +777,26 @@ export class AnnotationToolbar {
     menu.classList.add("is-open");
     const anchorRect = anchor.getBoundingClientRect();
     const menuRect = menu.getBoundingClientRect();
-    const viewportWidth = window.visualViewport?.width ?? window.innerWidth;
-    const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
-    const left = Math.max(8, Math.min(viewportWidth - menuRect.width - 8, anchorRect.left));
-    const top = anchorRect.bottom + menuRect.height + 8 <= viewportHeight
-      ? anchorRect.bottom + 6
-      : Math.max(8, anchorRect.top - menuRect.height - 6);
+    const visualViewport = window.visualViewport;
+    const viewportLeft = visualViewport?.offsetLeft ?? 0;
+    const viewportTop = visualViewport?.offsetTop ?? 0;
+    const viewportWidth = visualViewport?.width ?? window.innerWidth;
+    const viewportHeight = visualViewport?.height ?? window.innerHeight;
+    const left = Math.max(
+      viewportLeft + 8,
+      Math.min(
+        viewportLeft + viewportWidth - menuRect.width - 8,
+        anchorRect.left + anchorRect.width / 2 - menuRect.width / 2
+      )
+    );
+    const above = anchorRect.top - menuRect.height - 6;
+    const below = anchorRect.bottom + 6;
+    const top = above >= viewportTop + 8
+      ? above
+      : Math.max(
+          viewportTop + 8,
+          Math.min(viewportTop + viewportHeight - menuRect.height - 8, below)
+        );
     menu.style.left = `${left}px`;
     menu.style.top = `${top}px`;
   }

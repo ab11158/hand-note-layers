@@ -26,6 +26,8 @@ export type SelectionOperation =
   | "distribute-horizontal"
   | "distribute-vertical";
 
+export type SelectionContext = "selection" | "text";
+
 export class SelectionOverlay {
   readonly element: HTMLDivElement;
   readonly outline: SVGSVGElement;
@@ -34,16 +36,21 @@ export class SelectionOverlay {
   private readonly path: SVGPathElement;
   private readonly bounds: SVGRectElement;
   private readonly pasteButton: HTMLButtonElement;
+  private readonly selectionButtons: HTMLButtonElement[] = [];
+  private readonly textButtons: HTMLButtonElement[] = [];
+  private readonly fontControl: HTMLDivElement;
+  private readonly fontInput: HTMLInputElement;
 
   constructor(
     onDelete: () => void,
-    onCancel: () => void,
     onDuplicate: () => void,
     onCopy: () => void,
     onCut: () => void,
     onPaste: () => void,
     onColor: (color: string) => void,
     onScreenshot: () => void,
+    onEditText: (selectAll: boolean) => void,
+    onTextFontSize: (fontSize: number) => void,
     onTransformStart: (event: PointerEvent, handle: string) => void,
     onOperation: (operation: SelectionOperation) => void
   ) {
@@ -88,40 +95,77 @@ export class SelectionOverlay {
     screenshotButton.addEventListener("click", onScreenshot);
     const operationButtons: Array<[string, string, SelectionOperation]> = [
       ["lock", "锁定", "lock"],
-      ["unlock", "解锁", "unlock"],
-      ["group", "编组", "group"],
-      ["ungroup", "取消编组", "ungroup"],
-      ["bring-to-front", "置于顶层", "front"],
-      ["send-to-back", "置于底层", "back"],
-      ["align-start-horizontal", "左对齐", "align-left"],
-      ["align-center-horizontal", "水平居中", "align-center"],
-      ["align-end-horizontal", "右对齐", "align-right"],
-      ["align-start-vertical", "顶端对齐", "align-top"],
-      ["align-center-vertical", "垂直居中", "align-middle"],
-      ["align-end-vertical", "底端对齐", "align-bottom"],
-      ["columns-3", "水平分布", "distribute-horizontal"],
-      ["rows-3", "垂直分布", "distribute-vertical"]
+      ["unlock", "解锁", "unlock"]
     ];
     const objectButtons = operationButtons.map(([icon, label, operation]) => {
       const button = this.createButton(icon, label);
       button.addEventListener("click", () => onOperation(operation));
       return button;
     });
-    const cancelButton = this.createButton("x", "取消选择");
-    cancelButton.addEventListener("click", onCancel);
+    const selectAllButton = this.createButton("text-cursor-input", "全选");
+    selectAllButton.addEventListener("click", () => onEditText(true));
+    const fontButton = this.createButton("type", "字体");
+    this.fontControl = document.createElement("div");
+    this.fontControl.className = "hand-note-selection-font-control";
+    this.fontInput = document.createElement("input");
+    this.fontInput.type = "number";
+    this.fontInput.min = "8";
+    this.fontInput.max = "144";
+    this.fontInput.step = "1";
+    this.fontInput.value = "24";
+    this.fontInput.setAttribute("aria-label", "文本字号");
+    const fontUnit = document.createElement("span");
+    fontUnit.textContent = "px";
+    this.fontControl.append(this.fontInput, fontUnit);
+    fontButton.addEventListener("click", () => {
+      this.fontControl.classList.toggle("is-visible");
+      if (this.fontControl.classList.contains("is-visible")) {
+        this.fontInput.focus();
+        this.fontInput.select();
+      }
+    });
+    const applyFontSize = (): void => {
+      const fontSize = Math.max(8, Math.min(144, Number(this.fontInput.value) || 24));
+      this.fontInput.value = String(fontSize);
+      onTextFontSize(fontSize);
+    };
+    this.fontInput.addEventListener("change", applyFontSize);
+    this.fontInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        applyFontSize();
+        this.fontControl.classList.remove("is-visible");
+      }
+    });
+
+    const sharedButtons = [
+      duplicateButton,
+      copyButton,
+      cutButton,
+      this.pasteButton,
+      deleteButton,
+      colorButton
+    ];
+    this.selectionButtons.push(transformButton, screenshotButton, ...objectButtons);
+    this.textButtons.push(selectAllButton, fontButton);
     this.menu.append(
       duplicateButton,
       copyButton,
       cutButton,
       this.pasteButton,
       deleteButton,
+      selectAllButton,
+      fontButton,
+      this.fontControl,
       transformButton,
       colorButton,
       colorInput,
       screenshotButton,
-      ...objectButtons,
-      cancelButton
+      ...objectButtons
     );
+    sharedButtons.forEach((button) => button.dataset.selectionContext = "shared");
+    this.selectionButtons.forEach((button) => button.dataset.selectionContext = "selection");
+    this.textButtons.forEach((button) => button.dataset.selectionContext = "text");
 
     this.transformBox = document.createElement("div");
     this.transformBox.className = "hand-note-selection-transform";
@@ -159,7 +203,23 @@ export class SelectionOverlay {
     this.transformBox.append(rotateButton);
     this.element.append(this.outline, this.transformBox, this.menu);
     document.body.append(this.element);
+    this.setContext("selection");
     this.clear();
+  }
+
+  setContext(context: SelectionContext): void {
+    this.menu.dataset.context = context;
+    this.selectionButtons.forEach((button) => {
+      button.hidden = context !== "selection";
+    });
+    this.textButtons.forEach((button) => {
+      button.hidden = context !== "text";
+    });
+    this.fontControl.classList.remove("is-visible");
+  }
+
+  setTextFontSize(fontSize: number): void {
+    this.fontInput.value = String(Math.round(Math.max(8, Math.min(144, fontSize))));
   }
 
   setPasteEnabled(enabled: boolean): void {
@@ -192,15 +252,16 @@ export class SelectionOverlay {
     this.bounds.setAttribute("height", String(height));
     this.bounds.setAttribute("visibility", "visible");
 
-    const menuWidth = Math.min(292, Math.max(0, canvasRect.width - 16));
+    this.menu.classList.add("is-visible");
+    const measuredMenu = this.menu.getBoundingClientRect();
+    const menuWidth = Math.min(measuredMenu.width, Math.max(0, canvasRect.width - 16));
     const menuLeft = Math.max(8, Math.min(canvasRect.width - menuWidth - 8, left + width - menuWidth));
-    const estimatedMenuHeight = 126;
-    const menuTop = top >= estimatedMenuHeight + 8
-      ? top - estimatedMenuHeight - 6
-      : Math.min(canvasRect.height - estimatedMenuHeight - 8, top + height + 8);
+    const menuHeight = Math.min(measuredMenu.height, Math.max(0, canvasRect.height - 16));
+    const menuTop = top >= menuHeight + 8
+      ? top - menuHeight - 6
+      : Math.min(canvasRect.height - menuHeight - 8, top + height + 8);
     this.menu.style.left = `${menuLeft}px`;
     this.menu.style.top = `${Math.max(8, menuTop)}px`;
-    this.menu.classList.add("is-visible");
     this.transformBox.style.left = `${left}px`;
     this.transformBox.style.top = `${top}px`;
     this.transformBox.style.width = `${width}px`;
@@ -252,9 +313,12 @@ export class SelectionOverlay {
   private createButton(icon: string, label: string): HTMLButtonElement {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "clickable-icon hand-note-tool";
+    button.className = "clickable-icon hand-note-tool hand-note-selection-menu-button";
     setIcon(button, icon);
     setControlTooltip(button, label);
+    const text = document.createElement("span");
+    text.textContent = label;
+    button.append(text);
     return button;
   }
 }

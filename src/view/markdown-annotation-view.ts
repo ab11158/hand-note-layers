@@ -1,6 +1,7 @@
 import {
   ItemView,
   MarkdownRenderer,
+  Notice,
   TFile,
   ViewStateResult,
   WorkspaceLeaf
@@ -13,10 +14,15 @@ import {
   ShapeArrowHead,
   ShapeKind,
   ShapeLineStyle,
+  cloneDocument,
   createLayer,
   getActiveLayer,
   nextLayerName
 } from "../model/annotation";
+import {
+  exportCurrentAnnotation,
+  exportLayerPackage
+} from "../export/annotation-export";
 import {
   loadAnnotation,
   saveAnnotation
@@ -296,6 +302,8 @@ export class MarkdownAnnotationView extends ItemView {
       onRedo: () => this.currentInkCanvas()?.redo(),
       onClear: () => this.currentInkCanvas()?.clearActiveLayer(),
       onSave: () => void this.flushSave(),
+      onExport: (mode) => void this.exportDocument(mode),
+      exportPrimaryLabel: "导出当前文件",
       onLayers: () => {
         this.toggleLayerPanel(!this.layerPanel?.element.classList.contains("is-open"));
       }
@@ -365,6 +373,35 @@ export class MarkdownAnnotationView extends ItemView {
   async prepareExport(): Promise<TFile | null> {
     await this.flushSave();
     return this.sourceFile;
+  }
+
+  private async exportDocument(mode: "document" | "layers"): Promise<void> {
+    if (!this.sourceFile || !this.document) {
+      return;
+    }
+    try {
+      await this.flushSave();
+      if (mode === "document") {
+        const result = await exportCurrentAnnotation(this.app, this.sourceFile);
+        const drafts = result.excludedDraftWhiteboards
+          ? `，已排除 ${result.excludedDraftWhiteboards} 个未保存白板`
+          : "";
+        new Notice(`当前文件已导出到 ${result.directory}${drafts}`, 8000);
+        return;
+      }
+      const result = await exportLayerPackage(
+        this.app,
+        this.sourceFile,
+        cloneDocument(this.document)
+      );
+      const drafts = result.excludedDraftWhiteboards
+        ? `，已排除 ${result.excludedDraftWhiteboards} 个未保存白板`
+        : "";
+      new Notice(`图层包已导出到 ${result.path}${drafts}`, 8000);
+    } catch (error) {
+      console.error("Hand Note Layers: failed to export Markdown annotation", error);
+      new Notice("导出失败，请查看开发者控制台");
+    }
   }
 
   private handleDocumentChange(

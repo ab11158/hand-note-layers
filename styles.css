@@ -82,11 +82,12 @@
   border-radius: 4px;
   color: var(--text-normal);
   display: flex;
-  gap: 0;
-  justify-content: center;
+  gap: 6px;
+  justify-content: flex-start;
   min-height: 32px;
-  padding: 5px;
-  width: 34px;
+  min-width: 92px;
+  padding: 5px 8px;
+  width: auto;
   white-space: nowrap;
 }
 
@@ -97,8 +98,30 @@
 }
 
 .hand-note-eraser-option svg {
+  flex: 0 0 auto;
   height: 17px;
   width: 17px;
+}
+
+.hand-note-eraser-option span {
+  display: inline;
+  font-size: var(--font-ui-smaller);
+  line-height: 1.2;
+}
+
+.hand-note-shape-menu {
+  display: none;
+  grid-template-columns: repeat(2, minmax(138px, 1fr));
+  width: min(340px, calc(100vw - 16px));
+}
+
+.hand-note-shape-menu.is-open {
+  display: grid;
+}
+
+.hand-note-export-menu {
+  align-items: stretch;
+  flex-direction: column;
 }
 
 .hand-note-color-group {
@@ -248,10 +271,6 @@
   z-index: 1001;
 }
 
-.hand-note-eraser-option span {
-  display: none;
-}
-
 .hand-note-selection-layer:not(.is-visible) {
   display: none;
 }
@@ -290,12 +309,51 @@
   padding: 3px;
   pointer-events: auto;
   position: absolute;
-  width: 292px;
+  width: min(460px, calc(100% - 16px));
   z-index: 6;
 }
 
 .hand-note-selection-menu.is-visible {
   display: flex;
+}
+
+.hand-note-selection-menu-button {
+  gap: 5px;
+  padding: 5px 7px;
+  width: auto;
+}
+
+.hand-note-selection-menu-button[hidden] {
+  display: none;
+}
+
+.hand-note-selection-menu-button span {
+  font-size: var(--font-ui-smaller);
+  white-space: nowrap;
+}
+
+.hand-note-selection-font-control {
+  align-items: center;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  display: none;
+  gap: 4px;
+  padding: 3px 5px;
+}
+
+.hand-note-selection-font-control.is-visible {
+  display: flex;
+}
+
+.hand-note-selection-font-control input {
+  height: 28px;
+  width: 62px;
+}
+
+.hand-note-selection-font-control span {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
 }
 
 .hand-note-selection-transform {
@@ -804,14 +862,12 @@
 
 .hand-note-text-editor-portal {
   background: var(--background-primary);
-  border: 3px solid var(--interactive-accent);
-  border-radius: 6px;
+  border: 2px solid var(--interactive-accent);
+  border-radius: 4px;
   box-sizing: border-box;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.32), 0 0 0 2px var(--background-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--interactive-accent) 20%, transparent);
   display: none;
-  flex-direction: column;
-  gap: 6px;
-  padding: 6px;
+  padding: 0;
   position: fixed;
   z-index: 1100;
 }
@@ -820,36 +876,17 @@
   display: flex;
 }
 
-.hand-note-text-editor-header {
-  align-items: center;
-  color: var(--text-normal);
-  display: flex;
-  flex: 0 0 auto;
-  justify-content: space-between;
-  min-height: 32px;
-  padding-left: 6px;
-}
-
-.hand-note-text-editor-actions {
-  align-items: center;
-  display: flex;
-  flex: 0 0 auto;
-  justify-content: flex-end;
-}
-
 .hand-note-text-editor {
   background: var(--background-secondary);
-  border: 1px solid var(--background-modifier-border-hover);
-  border-radius: 4px;
+  border: 0;
+  border-radius: 2px;
   box-sizing: border-box;
   display: block;
-  flex: 1 1 auto;
-  font-family: var(--font-text);
+  font-family: sans-serif;
+  height: 100%;
   line-height: 1.25;
-  min-height: 0;
-  min-width: 0;
   outline: none;
-  padding: 10px;
+  padding: 4px;
   resize: none;
   touch-action: manipulation;
   width: 100%;

@@ -176,15 +176,6 @@ export class InkCanvas {
     dwellAnchor: StrokePoint | null;
     timer: number | null;
   } | null = null;
-  private textEditorScrollLock: {
-    target: HTMLElement | null;
-    scrollLeft: number;
-    scrollTop: number;
-    overflow: string;
-    overscrollBehavior: string;
-    windowX: number;
-    windowY: number;
-  } | null = null;
   private textLongPress: {
     pointerId: number;
     pointerType: string;
@@ -255,13 +246,14 @@ export class InkCanvas {
 
     this.selectionOverlay = new SelectionOverlay(
       () => this.deleteSelection(),
-      () => this.cancelSelection(),
       () => this.duplicateSelection(),
       () => this.copySelection(),
       () => this.cutSelection(),
       () => this.pasteSelection(),
       (color) => this.setSelectionColor(color),
       () => void this.exportSelectionScreenshot(),
+      (selectAll) => this.editSelectedText(selectAll),
+      (fontSize) => this.setSelectedTextFontSize(fontSize),
       (event, handle) => this.beginSelectionTransform(event, handle),
       (operation) => this.applySelectionOperation(operation)
     );
@@ -289,35 +281,14 @@ export class InkCanvas {
     document.body.append(this.pastePrompt);
     this.textEditorPortal = document.createElement("div");
     this.textEditorPortal.className = "hand-note-text-editor-portal";
-    const textEditorHeader = document.createElement("div");
-    textEditorHeader.className = "hand-note-text-editor-header";
-    const textEditorTitle = document.createElement("strong");
-    textEditorTitle.textContent = "编辑文本";
-    const textEditorActions = document.createElement("div");
-    textEditorActions.className = "hand-note-text-editor-actions";
-    const cancelTextButton = document.createElement("button");
-    cancelTextButton.type = "button";
-    cancelTextButton.className = "clickable-icon";
-    cancelTextButton.setAttribute("aria-label", "取消文本编辑");
-    cancelTextButton.setAttribute("title", "取消文本编辑");
-    setIcon(cancelTextButton, "x");
-    cancelTextButton.addEventListener("click", () => this.cancelTextEditor());
-    const completeTextButton = document.createElement("button");
-    completeTextButton.type = "button";
-    completeTextButton.className = "clickable-icon mod-cta";
-    completeTextButton.setAttribute("aria-label", "完成文本编辑");
-    completeTextButton.setAttribute("title", "完成文本编辑");
-    setIcon(completeTextButton, "check");
-    completeTextButton.addEventListener("click", this.commitTextEditor);
-    textEditorActions.append(cancelTextButton, completeTextButton);
-    textEditorHeader.append(textEditorTitle, textEditorActions);
     this.textEditor = document.createElement("textarea");
     this.textEditor.className = "hand-note-text-editor";
     this.textEditor.setAttribute("aria-label", "编辑文本框");
     this.textEditor.placeholder = "在此输入文本…";
     this.textEditor.addEventListener("input", this.handleTextEditorInput);
     this.textEditor.addEventListener("keydown", this.handleTextEditorKeyDown);
-    this.textEditorPortal.append(textEditorHeader, this.textEditor);
+    this.textEditor.addEventListener("blur", this.commitTextEditor);
+    this.textEditorPortal.append(this.textEditor);
 
     this.canvas.addEventListener("pointerdown", this.handlePointerDown);
     this.canvas.addEventListener("pointermove", this.handlePointerMove);
@@ -398,7 +369,6 @@ export class InkCanvas {
     this.clearPolylineState();
     this.finishShapeMove(false);
     InkCanvas.instances.delete(this);
-    this.unlockTextEditorScroll();
     window.visualViewport?.removeEventListener("resize", this.positionTextEditor);
     window.visualViewport?.removeEventListener("scroll", this.positionTextEditor);
     window.removeEventListener("resize", this.positionTextEditor);
@@ -525,6 +495,7 @@ export class InkCanvas {
     this.selectedStrokeIds.clear();
     this.selectedLayerId = null;
     this.selectionBounds = null;
+    this.selectionOverlay.setContext("selection");
     this.selectionOverlay.clear();
   }
 
@@ -662,6 +633,12 @@ export class InkCanvas {
     );
     layer.strokes.push(...pasted);
     this.cancelSelection();
+    if (pasted.length === 1 && pasted[0].tool === "text") {
+      this.selectionOverlay.setContext("text");
+      this.selectionOverlay.setTextFontSize(
+        pasted[0].fontSize ?? pasted[0].size ?? 24
+      );
+    }
     this.selectedLayerId = layer.id;
     this.selectedStrokeIds = new Set(pasted.map((stroke) => stroke.id));
     this.refreshSelectionBounds();
@@ -946,6 +923,41 @@ export class InkCanvas {
     this.options.onDocumentChange(document, false);
     this.render();
     return true;
+  }
+
+  private setSelectedTextFontSize(fontSize: number): void {
+    const document = this.options.getDocument();
+    const layer = document.layers.find((item) => item.id === this.selectedLayerId);
+    const stroke = layer?.strokes.find(
+      (item) => this.selectedStrokeIds.has(item.id) && item.tool === "text"
+    );
+    if (!layer || !stroke || stroke.locked) {
+      return;
+    }
+    const next = Math.max(8, Math.min(144, fontSize));
+    if ((stroke.fontSize ?? stroke.size) === next) {
+      return;
+    }
+    this.pushHistory(document);
+    stroke.fontSize = next;
+    stroke.size = next;
+    this.strokeBounds.delete(stroke);
+    this.selectionOverlay.setTextFontSize(next);
+    this.render();
+    this.options.onDocumentChange(document, false);
+  }
+
+  private editSelectedText(selectAll: boolean): void {
+    const layer = this.options
+      .getDocument()
+      .layers.find((item) => item.id === this.selectedLayerId);
+    const stroke = layer?.strokes.find(
+      (item) => this.selectedStrokeIds.has(item.id) && item.tool === "text"
+    );
+    if (!layer || !stroke || stroke.locked) {
+      return;
+    }
+    this.openTextEditor(layer.id, stroke.id, false, selectAll);
   }
 
   setSelectedShapeLineStyle(style: ShapeLineStyle): boolean {
@@ -1381,6 +1393,8 @@ export class InkCanvas {
 
   private selectTextStroke(layer: AnnotationLayer, stroke: AnnotationStroke): void {
     this.cancelSelection();
+    this.selectionOverlay.setContext("text");
+    this.selectionOverlay.setTextFontSize(stroke.fontSize ?? stroke.size ?? 24);
     this.selectedLayerId = layer.id;
     this.selectedStrokeIds = new Set([stroke.id]);
     this.selectionBounds = this.getStrokeBounds(stroke);
@@ -1509,6 +1523,7 @@ export class InkCanvas {
   }
 
   selectAll(): void {
+    this.selectionOverlay.setContext("selection");
     const layer = getActiveLayer(this.options.getDocument());
     const strokes = layer.strokes.filter(
       (stroke) =>
@@ -2507,6 +2522,7 @@ export class InkCanvas {
       return;
     }
     this.cancelSelection();
+    this.selectionOverlay.setContext("selection");
     this.selectedShapeLayerId = layerId;
     this.selectedShapeId = strokeId;
     const selected = stroke.groupId
@@ -2776,7 +2792,12 @@ export class InkCanvas {
     }
   }
 
-  private openTextEditor(layerId: string, strokeId: string, created = false): void {
+  private openTextEditor(
+    layerId: string,
+    strokeId: string,
+    created = false,
+    selectAll = false
+  ): void {
     this.commitTextEditor();
     const layer = this.options.getDocument().layers.find((item) => item.id === layerId);
     const stroke = layer?.strokes.find((item) => item.id === strokeId);
@@ -2805,14 +2826,13 @@ export class InkCanvas {
     this.textEditor.style.fontSize = `${stroke.fontSize ?? stroke.size}px`;
     document.body.append(this.textEditorPortal);
     this.textEditorPortal.classList.add("is-visible");
-    this.lockTextEditorScroll();
     window.visualViewport?.addEventListener("resize", this.positionTextEditor);
     window.visualViewport?.addEventListener("scroll", this.positionTextEditor);
     window.addEventListener("resize", this.positionTextEditor);
     this.positionTextEditor();
     window.setTimeout(() => {
-      this.textEditor.focus();
-      if (created) {
+      this.textEditor.focus({ preventScroll: true });
+      if (created || selectAll) {
         this.textEditor.select();
       }
     }, 0);
@@ -2940,7 +2960,6 @@ export class InkCanvas {
     window.visualViewport?.removeEventListener("resize", this.positionTextEditor);
     window.visualViewport?.removeEventListener("scroll", this.positionTextEditor);
     window.removeEventListener("resize", this.positionTextEditor);
-    this.unlockTextEditorScroll();
     this.textEditorPortal.remove();
   }
 
@@ -2959,62 +2978,25 @@ export class InkCanvas {
       return;
     }
     this.selectionOverlay.hideMenu();
-    const lock = this.textEditorScrollLock;
-    if (lock?.target) {
-      lock.target.scrollLeft = lock.scrollLeft;
-      lock.target.scrollTop = lock.scrollTop;
+    const stroke = this.currentTextStroke();
+    if (!stroke) {
+      return;
     }
-    const visualViewport = window.visualViewport;
-    const viewportLeft = visualViewport?.offsetLeft ?? 0;
-    const viewportTop = visualViewport?.offsetTop ?? 0;
-    const viewportWidth = visualViewport?.width ?? window.innerWidth;
-    const viewportHeight = visualViewport?.height ?? window.innerHeight;
-    const margin = 12;
-    const width = Math.max(120, Math.min(560, viewportWidth - margin * 2));
+    const canvasRect = this.canvas.getBoundingClientRect();
+    const viewport = this.currentViewport(canvasRect);
+    const bounds = this.getStrokeBounds(stroke);
+    const left = canvasRect.left + bounds.minX * viewport.documentWidth - viewport.offsetX;
+    const top = canvasRect.top + bounds.minY * viewport.documentHeight - viewport.offsetY;
+    const width = Math.max(60, (bounds.maxX - bounds.minX) * viewport.documentWidth);
     const height = Math.max(
-      96,
-      Math.min(240, viewportHeight - margin * 2, viewportHeight * 0.34)
+      (stroke.fontSize ?? stroke.size ?? 24) * 1.5,
+      (bounds.maxY - bounds.minY) * viewport.documentHeight
     );
-    this.textEditorPortal.style.left = `${viewportLeft + Math.max(margin, (viewportWidth - width) / 2)}px`;
-    this.textEditorPortal.style.top = `${viewportTop + Math.max(margin, viewportHeight - height - margin)}px`;
+    this.textEditorPortal.style.left = `${left}px`;
+    this.textEditorPortal.style.top = `${top}px`;
     this.textEditorPortal.style.width = `${width}px`;
     this.textEditorPortal.style.height = `${height}px`;
   };
-
-  private lockTextEditorScroll(): void {
-    if (this.textEditorScrollLock) {
-      return;
-    }
-    const target = this.canvas.closest(".hand-note-scroll") as HTMLElement | null;
-    this.textEditorScrollLock = {
-      target,
-      scrollLeft: target?.scrollLeft ?? 0,
-      scrollTop: target?.scrollTop ?? 0,
-      overflow: target?.style.overflow ?? "",
-      overscrollBehavior: target?.style.overscrollBehavior ?? "",
-      windowX: window.scrollX,
-      windowY: window.scrollY
-    };
-    if (target) {
-      target.style.overflow = "hidden";
-      target.style.overscrollBehavior = "none";
-    }
-  }
-
-  private unlockTextEditorScroll(): void {
-    const lock = this.textEditorScrollLock;
-    if (!lock) {
-      return;
-    }
-    if (lock.target) {
-      lock.target.style.overflow = lock.overflow;
-      lock.target.style.overscrollBehavior = lock.overscrollBehavior;
-      lock.target.scrollLeft = lock.scrollLeft;
-      lock.target.scrollTop = lock.scrollTop;
-    }
-    window.scrollTo(lock.windowX, lock.windowY);
-    this.textEditorScrollLock = null;
-  }
 
   private handlePointerDown = (event: PointerEvent): void => {
     if (event.pointerType === "pen") {
@@ -4514,6 +4496,7 @@ export class InkCanvas {
   }
 
   private finalizeLasso(): void {
+    this.selectionOverlay.setContext("selection");
     const viewport =
       this.activeViewport ?? this.currentViewport(this.canvas.getBoundingClientRect());
     if (this.lassoPoints.length < 3) {

@@ -315,6 +315,7 @@ export class PdfAnnotationView extends ItemView {
       onClear: () => this.currentInkCanvas()?.clearActiveLayer(),
       onSave: () => void this.flushSave(),
       onExport: (mode) => void this.exportDocument(mode),
+      exportPrimaryLabel: "合成 PDF",
       onLayers: () => {
         this.toggleLayerPanel(!this.layerPanel?.element.classList.contains("is-open"));
       },
@@ -1000,8 +1001,8 @@ export class PdfAnnotationView extends ItemView {
     }
   }
 
-  private async exportDocument(mode: "pdf" | "layers"): Promise<void> {
-    if (mode === "pdf") {
+  private async exportDocument(mode: "document" | "layers"): Promise<void> {
+    if (mode === "document") {
       await this.exportPdf();
       return;
     }

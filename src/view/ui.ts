@@ -53,13 +53,13 @@ export function setControlTooltip(element: HTMLElement, label: string): void {
       dwellTooltip.style.left = `${left}px`;
       dwellTooltip.style.top = `${Math.max(8, top)}px`;
       timer = null;
-    }, 520);
+    }, 550);
   });
   element.addEventListener("pointermove", (event) => {
     if (
       event.pointerType !== "pen" ||
       event.buttons !== 0 ||
-      Math.hypot(event.clientX - startX, event.clientY - startY) > 4
+      Math.hypot(event.clientX - startX, event.clientY - startY) > 10
     ) {
       cancel();
     }
