@@ -4,7 +4,7 @@ import { AnnotationDocument, cloneDocument } from "../model/annotation";
 import { getAnnotationPath, loadAnnotation } from "../storage/annotation-store";
 import { drawFreehandStroke } from "../view/freehand-renderer";
 
-const EXPORT_ROOT = "Hand Note Layers 导出";
+const EXPORT_ROOT = "HandLayers 导出";
 
 export interface AnnotationExportResult {
   directory: string;
@@ -58,7 +58,7 @@ function shapePathData(
   if ((stroke.shape === "curve" || stroke.shape === "connector-curve") && points.length >= 4) {
     return `M${points[0].x},${points[0].y} C${points[1].x},${points[1].y} ${points[2].x},${points[2].y} ${points[3].x},${points[3].y}`;
   }
-  if (stroke.shape === "ellipse" && points.length >= 4) {
+  if ((stroke.shape === "ellipse" || stroke.shape === "circle") && points.length >= 4) {
     const commands: string[] = [`M${points[0].x},${points[0].y}`];
     for (let index = 0; index < 4; index += 1) {
       const previous = points[(index + 3) % 4];
@@ -158,7 +158,7 @@ function strokeSvg(
           y: point.y * 1000
         }));
         const path = shapePathData(stroke, pixels);
-        const fill = stroke.fillColor && (stroke.closed || stroke.shape === "rectangle" || stroke.shape === "ellipse")
+        const fill = stroke.fillColor && (stroke.closed || stroke.shape === "rectangle" || stroke.shape === "ellipse" || stroke.shape === "circle")
           ? xmlEscape(stroke.fillColor)
           : "none";
         const dash = stroke.lineStyle === "dashed"
@@ -168,7 +168,7 @@ function strokeSvg(
             : "";
         const firstAdjacent = pixels[1];
         const lastAdjacent = pixels[pixels.length - 2];
-        const arrows = stroke.closed || stroke.shape === "rectangle" || stroke.shape === "ellipse" || pixels.length < 2 ? "" :
+        const arrows = stroke.closed || stroke.shape === "rectangle" || stroke.shape === "ellipse" || stroke.shape === "circle" || pixels.length < 2 ? "" :
           shapeArrowSvg(pixels[0], firstAdjacent, stroke.startArrow, color, opacity, stroke.size) +
           shapeArrowSvg(pixels[pixels.length - 1], lastAdjacent, stroke.endArrow, color, opacity, stroke.size);
         return `<path d="${path}" fill="${fill}" fill-opacity="${stroke.fillOpacity ?? 0.14}" stroke="${color}" stroke-width="${stroke.size}" stroke-linecap="round" stroke-linejoin="round"${dash ? ` stroke-dasharray="${dash}"` : ""} opacity="${opacity}"/>${arrows}`;
@@ -427,7 +427,7 @@ function drawCanvasStroke(
         context.moveTo(points[0].x, points[0].y);
         points.slice(1, 4).forEach((point) => context.lineTo(point.x, point.y));
         context.closePath();
-      } else if (stroke.shape === "ellipse" && points.length >= 4) {
+      } else if ((stroke.shape === "ellipse" || stroke.shape === "circle") && points.length >= 4) {
         context.moveTo(points[0].x, points[0].y);
         for (let index = 0; index < 4; index += 1) {
           const previous = points[(index + 3) % 4];
@@ -451,7 +451,7 @@ function drawCanvasStroke(
           context.closePath();
         }
       }
-      if (stroke.fillColor && (stroke.closed || stroke.shape === "rectangle" || stroke.shape === "ellipse")) {
+      if (stroke.fillColor && (stroke.closed || stroke.shape === "rectangle" || stroke.shape === "ellipse" || stroke.shape === "circle")) {
         context.save();
         context.globalAlpha *= stroke.fillOpacity ?? 0.14;
         context.fillStyle = stroke.fillColor;
@@ -460,7 +460,7 @@ function drawCanvasStroke(
       }
       context.stroke();
       context.setLineDash([]);
-      if (!stroke.closed && stroke.shape !== "rectangle" && stroke.shape !== "ellipse") {
+      if (!stroke.closed && stroke.shape !== "rectangle" && stroke.shape !== "ellipse" && stroke.shape !== "circle") {
         drawCanvasShapeArrow(context, points[0], points[1], stroke.startArrow, stroke.size);
         drawCanvasShapeArrow(
           context,
@@ -911,5 +911,51 @@ export async function exportVaultAnnotations(
       (total, entry) => total + entry.excludedDraftWhiteboards,
       0
     )
+  };
+}
+
+export async function exportVaultAnnotatedPdfs(
+  app: App
+): Promise<AnnotationExportResult> {
+  let exportedFiles = 0;
+  let excludedDraftWhiteboards = 0;
+  for (const source of app.vault.getFiles()) {
+    if (
+      source.extension !== "pdf" ||
+      !(await app.vault.adapter.exists(getAnnotationPath(source)))
+    ) {
+      continue;
+    }
+    const result = await exportAnnotatedPdf(app, source, await loadAnnotation(app, source));
+    exportedFiles += 1;
+    excludedDraftWhiteboards += result.excludedDraftWhiteboards;
+  }
+  return {
+    directory: EXPORT_ROOT,
+    exportedFiles,
+    excludedDraftWhiteboards
+  };
+}
+
+export async function exportVaultLayerPackages(
+  app: App
+): Promise<AnnotationExportResult> {
+  let exportedFiles = 0;
+  let excludedDraftWhiteboards = 0;
+  for (const source of app.vault.getFiles()) {
+    if (
+      (source.extension !== "md" && source.extension !== "pdf") ||
+      !(await app.vault.adapter.exists(getAnnotationPath(source)))
+    ) {
+      continue;
+    }
+    const result = await exportLayerPackage(app, source, await loadAnnotation(app, source));
+    exportedFiles += 1;
+    excludedDraftWhiteboards += result.excludedDraftWhiteboards;
+  }
+  return {
+    directory: EXPORT_ROOT,
+    exportedFiles,
+    excludedDraftWhiteboards
   };
 }

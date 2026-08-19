@@ -303,7 +303,7 @@ export class MarkdownAnnotationView extends ItemView {
       onClear: () => this.currentInkCanvas()?.clearActiveLayer(),
       onSave: () => void this.flushSave(),
       onExport: (mode) => void this.exportDocument(mode),
-      exportPrimaryLabel: "导出当前文件",
+      exportPrimaryLabel: "当前笔记导出",
       onLayers: () => {
         this.toggleLayerPanel(!this.layerPanel?.element.classList.contains("is-open"));
       }
@@ -375,7 +375,7 @@ export class MarkdownAnnotationView extends ItemView {
     return this.sourceFile;
   }
 
-  private async exportDocument(mode: "document" | "layers"): Promise<void> {
+  async exportDocument(mode: "document" | "layers"): Promise<void> {
     if (!this.sourceFile || !this.document) {
       return;
     }

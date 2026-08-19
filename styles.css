@@ -119,6 +119,24 @@
   display: grid;
 }
 
+.hand-note-common-shape-menu {
+  display: none;
+  grid-template-columns: repeat(2, minmax(128px, 1fr));
+  width: min(320px, calc(100vw - 16px));
+}
+
+.hand-note-common-shape-menu.is-open {
+  display: grid;
+}
+
+.hand-note-menu-heading {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-semibold);
+  grid-column: 1 / -1;
+  padding: 5px 8px 2px;
+}
+
 .hand-note-export-menu {
   align-items: stretch;
   flex-direction: column;
@@ -895,6 +913,22 @@
 .hand-note-text-editor::placeholder {
   color: var(--text-muted);
   opacity: 1;
+}
+
+.hand-note-eraser-menu,
+.hand-note-selection-menu,
+.hand-note-selection-font-control,
+.hand-note-whiteboard-controls,
+.hand-note-dwell-tooltip,
+.hand-note-canvas-paste-prompt,
+.hand-note-text-editor-portal {
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  background: color-mix(in srgb, var(--background-primary) 50%, transparent);
+}
+
+.hand-note-text-editor {
+  background: color-mix(in srgb, var(--background-secondary) 50%, transparent);
 }
 
 .hand-note-layer-footer {

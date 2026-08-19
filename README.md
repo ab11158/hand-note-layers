@@ -1,6 +1,6 @@
-# Hand Note Layers
+# HandLayers
 
-Hand Note Layers 是一个 Obsidian 插件，用于在 Markdown 和 PDF 文件上添加基于笔记层的手写标注。
+HandLayers 是一个 Obsidian 插件，用于在 Markdown 和 PDF 文件上添加基于笔记层的手写标注。
 
 ## 功能
 
@@ -61,16 +61,16 @@ Hand Note Layers 是一个 Obsidian 插件，用于在 Markdown 和 PDF 文件�
 3. 启用 BRAT。
 4. 执行命令 `BRAT: Add a beta plugin for testing`。
 5. 输入本插件的 GitHub 仓库地址。
-6. 安装完成后启用 Hand Note Layers。
+6. 安装完成后启用 HandLayers。
 
 ## 使用
 
 打开一个 Markdown 或 PDF 文件，然后：
 
 - 点击左侧 Ribbon 中的 `pen-tool` 图标。
-- 或执行命令 `用 Hand Note Layers 标注当前文件`。
+- 或执行命令 `用 HandLayers 标注当前文件`。
 
-Markdown 文件会进入独立的标注视图。PDF 文件默认会使用 Hand Note Layers 的 PDF 标注视图打开。
+Markdown 文件会进入独立的标注视图。PDF 文件默认会使用 HandLayers 的 PDF 标注视图打开。
 
 Apple Pencil 2 的笔背双击属于 iOS 原生 `UIPencilInteraction`。Obsidian
 社区插件目前无法直接读取该原生回调；插件已支持 Web Pointer Events
@@ -80,10 +80,12 @@ Apple Pencil 2 的笔背双击属于 iOS 原生 `UIPencilInteraction`。Obsidian
 
 命令面板提供：
 
-- `导出当前文件（保留 Hand Note Layers 图层）`
-- `导出整个仓库的 Hand Note Layers 文件`
+- `HandLayers：导出当前 PDF（合并可见批注）`
+- `HandLayers：导出当前笔记所有图层 ZIP`
+- `HandLayers：导出整个仓库的批注 PDF`
+- `HandLayers：导出整个仓库的所有图层 ZIP`
 
-导出结果保存在仓库的 `Hand Note Layers 导出` 目录，包含源文件副本、
+导出结果保存在仓库的 `HandLayers 导出` 目录，包含源文件副本、
 完整图层数据和合并后的可见图层 SVG。未保存的临时白板不会进入导出，
 完成提示会显示被排除的数量。
 

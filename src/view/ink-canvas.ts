@@ -1878,7 +1878,7 @@ export class InkCanvas {
         context.lineTo(points[index].x, points[index].y);
       }
       context.closePath();
-    } else if (stroke.shape === "ellipse" && points.length >= 4) {
+    } else if ((stroke.shape === "ellipse" || stroke.shape === "circle") && points.length >= 4) {
       context.moveTo(points[0].x, points[0].y);
       for (let index = 0; index < 4; index += 1) {
         const previous = points[(index + 3) % 4];
@@ -1904,7 +1904,7 @@ export class InkCanvas {
         context.closePath();
       }
     }
-    if (stroke.fillColor && (stroke.closed || stroke.shape === "rectangle" || stroke.shape === "ellipse")) {
+    if (stroke.fillColor && (stroke.closed || stroke.shape === "rectangle" || stroke.shape === "ellipse" || stroke.shape === "circle")) {
       context.save();
       context.globalAlpha *= stroke.fillOpacity ?? 0.14;
       context.fillStyle = stroke.fillColor;
@@ -1919,7 +1919,7 @@ export class InkCanvas {
     const lastAdjacent = (stroke.shape === "curve" || stroke.shape === "connector-curve") && points.length >= 4
       ? points[points.length - 2]
       : points[points.length - 2];
-    const closedShape = stroke.closed || stroke.shape === "rectangle" || stroke.shape === "ellipse";
+    const closedShape = stroke.closed || stroke.shape === "rectangle" || stroke.shape === "ellipse" || stroke.shape === "circle";
     if (!closedShape && firstAdjacent) {
       this.drawShapeArrow(context, points[0], firstAdjacent, stroke.startArrow ?? "none", stroke.size);
     }
@@ -2093,6 +2093,7 @@ export class InkCanvas {
         ? this.options.getColor()
         : undefined,
       fillOpacity: tool === "shape" && this.options.getShapeFillEnabled?.() ? 0.14 : undefined,
+      closed: tool === "shape" && this.isClosedShapeKind(shapeKind) ? true : undefined,
       text: tool === "text" ? "" : undefined,
       fontSize: tool === "text" ? this.options.getSize() : undefined
     };
@@ -2161,11 +2162,22 @@ export class InkCanvas {
         point(start.x, end.y)
       ];
     }
-    if (kind === "ellipse") {
-      const left = Math.min(start.x, end.x);
-      const right = Math.max(start.x, end.x);
-      const top = Math.min(start.y, end.y);
-      const bottom = Math.max(start.y, end.y);
+    let shapeEnd = end;
+    if (kind === "circle") {
+      const viewport = this.activeViewport ?? this.currentViewport(this.canvas.getBoundingClientRect());
+      const dx = (end.x - start.x) * viewport.documentWidth;
+      const dy = (end.y - start.y) * viewport.documentHeight;
+      const diameter = Math.max(Math.abs(dx), Math.abs(dy));
+      shapeEnd = point(
+        start.x + (Math.sign(dx) || 1) * diameter / Math.max(1, viewport.documentWidth),
+        start.y + (Math.sign(dy) || 1) * diameter / Math.max(1, viewport.documentHeight)
+      );
+    }
+    if (kind === "ellipse" || kind === "circle") {
+      const left = Math.min(start.x, shapeEnd.x);
+      const right = Math.max(start.x, shapeEnd.x);
+      const top = Math.min(start.y, shapeEnd.y);
+      const bottom = Math.max(start.y, shapeEnd.y);
       const centerX = (left + right) / 2;
       const centerY = (top + bottom) / 2;
       return [
@@ -2174,6 +2186,68 @@ export class InkCanvas {
         point(centerX, bottom),
         point(left, centerY)
       ];
+    }
+    const left = Math.min(start.x, end.x);
+    const right = Math.max(start.x, end.x);
+    const top = Math.min(start.y, end.y);
+    const bottom = Math.max(start.y, end.y);
+    const width = right - left;
+    const height = bottom - top;
+    const centerX = (left + right) / 2;
+    const centerY = (top + bottom) / 2;
+    if (kind === "triangle") {
+      return [point(centerX, top), point(right, bottom), point(left, bottom)];
+    }
+    if (kind === "right-triangle") {
+      return [point(left, top), point(right, bottom), point(left, bottom)];
+    }
+    if (kind === "diamond") {
+      return [
+        point(centerX, top),
+        point(right, centerY),
+        point(centerX, bottom),
+        point(left, centerY)
+      ];
+    }
+    if (kind === "parallelogram") {
+      return [
+        point(left + width * 0.22, top),
+        point(right, top),
+        point(right - width * 0.22, bottom),
+        point(left, bottom)
+      ];
+    }
+    if (kind === "trapezoid") {
+      return [
+        point(left + width * 0.2, top),
+        point(right - width * 0.2, top),
+        point(right, bottom),
+        point(left, bottom)
+      ];
+    }
+    const regularPolygon = (sides: number): StrokePoint[] =>
+      Array.from({ length: sides }, (_, index) => {
+        const angle = -Math.PI / 2 + index * Math.PI * 2 / sides;
+        return point(
+          centerX + Math.cos(angle) * width / 2,
+          centerY + Math.sin(angle) * height / 2
+        );
+      });
+    if (kind === "pentagon") {
+      return regularPolygon(5);
+    }
+    if (kind === "hexagon") {
+      return regularPolygon(6);
+    }
+    if (kind === "star") {
+      return Array.from({ length: 10 }, (_, index) => {
+        const angle = -Math.PI / 2 + index * Math.PI / 5;
+        const radius = index % 2 === 0 ? 0.5 : 0.22;
+        return point(
+          centerX + Math.cos(angle) * width * radius,
+          centerY + Math.sin(angle) * height * radius
+        );
+      });
     }
     if (kind === "connector-elbow") {
       const middleX = (start.x + end.x) / 2;
@@ -2192,6 +2266,22 @@ export class InkCanvas {
       point(start.x + (dx * 2) / 3, end.y - dy * 0.08),
       { ...end }
     ];
+  }
+
+  private isClosedShapeKind(kind: ShapeKind): boolean {
+    return [
+      "rectangle",
+      "ellipse",
+      "circle",
+      "triangle",
+      "right-triangle",
+      "diamond",
+      "parallelogram",
+      "trapezoid",
+      "pentagon",
+      "hexagon",
+      "star"
+    ].includes(kind);
   }
 
   private startPolylineState(stroke: AnnotationStroke, start: StrokePoint): void {
@@ -3614,6 +3704,21 @@ export class InkCanvas {
         end.y * viewport.documentHeight
       );
       if (distance <= radius) {
+        return true;
+      }
+    }
+
+    if (stroke.closed && stroke.points.length > 2) {
+      const start = stroke.points[stroke.points.length - 1];
+      const end = stroke.points[0];
+      if (this.distanceToSegment(
+        pixelX,
+        pixelY,
+        start.x * viewport.documentWidth,
+        start.y * viewport.documentHeight,
+        end.x * viewport.documentWidth,
+        end.y * viewport.documentHeight
+      ) <= radius) {
         return true;
       }
     }
