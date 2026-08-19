@@ -5,6 +5,7 @@ import { getAnnotationPath, loadAnnotation } from "../storage/annotation-store";
 import { drawFreehandStroke } from "../view/freehand-renderer";
 
 const EXPORT_ROOT = "HandLayers 导出";
+const ELLIPSE_CONTROL_FACTOR = 2 * (Math.sqrt(2) - 1) / 3;
 
 export interface AnnotationExportResult {
   directory: string;
@@ -81,8 +82,8 @@ function shapePathData(
       const next = points[(index + 1) % 4];
       const after = points[(index + 2) % 4];
       commands.push(
-        `C${current.x + (next.x - previous.x) / 6},${current.y + (next.y - previous.y) / 6} ` +
-        `${next.x - (after.x - current.x) / 6},${next.y - (after.y - current.y) / 6} ${next.x},${next.y}`
+        `C${current.x + (next.x - previous.x) * ELLIPSE_CONTROL_FACTOR},${current.y + (next.y - previous.y) * ELLIPSE_CONTROL_FACTOR} ` +
+        `${next.x - (after.x - current.x) * ELLIPSE_CONTROL_FACTOR},${next.y - (after.y - current.y) * ELLIPSE_CONTROL_FACTOR} ${next.x},${next.y}`
       );
     }
     commands.push("Z");
@@ -454,10 +455,10 @@ function drawCanvasStroke(
           const next = points[(index + 1) % 4];
           const after = points[(index + 2) % 4];
           context.bezierCurveTo(
-            current.x + (next.x - previous.x) / 6,
-            current.y + (next.y - previous.y) / 6,
-            next.x - (after.x - current.x) / 6,
-            next.y - (after.y - current.y) / 6,
+            current.x + (next.x - previous.x) * ELLIPSE_CONTROL_FACTOR,
+            current.y + (next.y - previous.y) * ELLIPSE_CONTROL_FACTOR,
+            next.x - (after.x - current.x) * ELLIPSE_CONTROL_FACTOR,
+            next.y - (after.y - current.y) * ELLIPSE_CONTROL_FACTOR,
             next.x,
             next.y
           );

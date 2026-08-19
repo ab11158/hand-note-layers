@@ -81,6 +81,7 @@ export class InkCanvas {
   private static readonly SHAPE_ANCHOR_EXIT_PX = 12;
   private static readonly SHAPE_MIN_SIZE_PX = 6;
   private static readonly SHAPE_CLOSE_PX = 14;
+  private static readonly ELLIPSE_CONTROL_FACTOR = 2 * (Math.sqrt(2) - 1) / 3;
   private static readonly instances = new Set<InkCanvas>();
   private static selectionClipboard: {
     strokes: AnnotationStroke[];
@@ -1913,10 +1914,10 @@ export class InkCanvas {
         const next = points[(index + 1) % 4];
         const after = points[(index + 2) % 4];
         context.bezierCurveTo(
-          current.x + (next.x - previous.x) / 6,
-          current.y + (next.y - previous.y) / 6,
-          next.x - (after.x - current.x) / 6,
-          next.y - (after.y - current.y) / 6,
+          current.x + (next.x - previous.x) * InkCanvas.ELLIPSE_CONTROL_FACTOR,
+          current.y + (next.y - previous.y) * InkCanvas.ELLIPSE_CONTROL_FACTOR,
+          next.x - (after.x - current.x) * InkCanvas.ELLIPSE_CONTROL_FACTOR,
+          next.y - (after.y - current.y) * InkCanvas.ELLIPSE_CONTROL_FACTOR,
           next.x,
           next.y
         );
