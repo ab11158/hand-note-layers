@@ -44,7 +44,7 @@ export default class HandNoteLayersPlugin extends Plugin {
 
     this.addCommand({
       id: "annotate-current-file",
-      name: "用 HandLayers 标注当前文件",
+      name: "标注当前文件",
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
         if (!file || !this.isSupported(file)) {
@@ -59,7 +59,7 @@ export default class HandNoteLayersPlugin extends Plugin {
 
     this.addCommand({
       id: "annotate-current-markdown",
-      name: "用 HandLayers 标注当前 Markdown",
+      name: "标注当前 Markdown",
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
         if (!file || file.extension !== "md") {
@@ -89,7 +89,7 @@ export default class HandNoteLayersPlugin extends Plugin {
 
     this.addCommand({
       id: "export-current-pdf",
-      name: "HandLayers：导出当前 PDF（合并可见批注）",
+      name: "导出当前 PDF（合并可见批注）",
       checkCallback: (checking) => {
         const view = this.getActiveAnnotationView();
         const file = this.app.workspace.getActiveFile();
@@ -103,7 +103,7 @@ export default class HandNoteLayersPlugin extends Plugin {
 
     this.addCommand({
       id: "export-current-layers",
-      name: "HandLayers：导出当前笔记所有图层 ZIP",
+      name: "导出当前笔记所有图层 ZIP",
       checkCallback: (checking) => {
         const view = this.getActiveAnnotationView();
         const file = this.app.workspace.getActiveFile();
@@ -117,13 +117,13 @@ export default class HandNoteLayersPlugin extends Plugin {
 
     this.addCommand({
       id: "export-vault-pdfs",
-      name: "HandLayers：导出整个仓库的批注 PDF",
+      name: "导出整个仓库的批注 PDF",
       callback: () => void this.exportVaultPdfs()
     });
 
     this.addCommand({
       id: "export-vault-layers",
-      name: "HandLayers：导出整个仓库的所有图层 ZIP",
+      name: "导出整个仓库的所有图层 ZIP",
       callback: () => void this.exportVaultLayers()
     });
 
@@ -136,20 +136,15 @@ export default class HandNoteLayersPlugin extends Plugin {
     });
   }
 
-  onunload(): void {
-    this.app.workspace.detachLeavesOfType(MARKDOWN_ANNOTATION_VIEW_TYPE);
-    this.app.workspace.detachLeavesOfType(PDF_ANNOTATION_VIEW_TYPE);
-  }
-
   private isSupported(file: TFile): boolean {
     return file.extension === "md" || file.extension === "pdf";
   }
 
   private getActiveAnnotationView(): MarkdownAnnotationView | PdfAnnotationView | null {
-    const view = this.app.workspace.activeLeaf?.view;
-    return view instanceof MarkdownAnnotationView || view instanceof PdfAnnotationView
-      ? view
-      : null;
+    return (
+      this.app.workspace.getActiveViewOfType(MarkdownAnnotationView) ??
+      this.app.workspace.getActiveViewOfType(PdfAnnotationView)
+    );
   }
 
   private async exportCurrentPdf(): Promise<void> {
@@ -241,7 +236,7 @@ export default class HandNoteLayersPlugin extends Plugin {
         ? PDF_ANNOTATION_VIEW_TYPE
         : MARKDOWN_ANNOTATION_VIEW_TYPE;
 
-    this.app.workspace.getLeaf(true).setViewState({
+    void this.app.workspace.getLeaf(true).setViewState({
       type: viewType,
       active: true,
       state: { file: file.path }

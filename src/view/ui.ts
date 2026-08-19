@@ -1,4 +1,4 @@
-import { setIcon, setTooltip } from "obsidian";
+import { setIcon } from "obsidian";
 
 let dwellTooltip: HTMLDivElement | null = null;
 
@@ -10,7 +10,6 @@ function hideDwellTooltip(): void {
 export function setControlTooltip(element: HTMLElement, label: string): void {
   element.setAttribute("aria-label", label);
   element.dataset.handNoteTooltip = label;
-  setTooltip(element, label);
   if (element.dataset.handNoteDwellBound === "true") {
     return;
   }

@@ -1,4 +1,4 @@
-import { Notice, setIcon } from "obsidian";
+import { Notice, Platform, setIcon } from "obsidian";
 import {
   AnnotationDocument,
   AnnotationLayer,
@@ -234,11 +234,6 @@ export class InkCanvas {
     this.options = options;
     this.canvas = document.createElement("canvas");
     this.canvas.className = "hand-note-canvas";
-    this.canvas.style.position = "absolute";
-    this.canvas.style.inset = "0";
-    this.canvas.style.width = "100%";
-    this.canvas.style.height = "100%";
-    this.canvas.style.zIndex = "3";
 
     const context = this.canvas.getContext("2d");
     if (!context) {
@@ -248,12 +243,6 @@ export class InkCanvas {
 
     this.liveCanvas = document.createElement("canvas");
     this.liveCanvas.className = "hand-note-canvas hand-note-live-canvas";
-    this.liveCanvas.style.position = "absolute";
-    this.liveCanvas.style.inset = "0";
-    this.liveCanvas.style.width = "100%";
-    this.liveCanvas.style.height = "100%";
-    this.liveCanvas.style.pointerEvents = "none";
-    this.liveCanvas.style.zIndex = "4";
     const liveContext = this.liveCanvas.getContext("2d");
     if (!liveContext) {
       throw new Error("Unable to create live ink context");
@@ -446,10 +435,8 @@ export class InkCanvas {
     if (tool !== "text") {
       this.commitTextEditor();
     }
-    this.canvas.style.pointerEvents = "auto";
-    this.canvas.style.touchAction = "none";
-    this.canvas.style.cursor =
-      tool === "eraser" ? "cell" : tool === "hand" ? "grab" : "crosshair";
+    this.canvas.classList.toggle("is-eraser", tool === "eraser");
+    this.canvas.classList.toggle("is-hand", tool === "hand");
   }
 
   setViewport(viewport: InkCanvasViewport | null): void {
@@ -457,19 +444,23 @@ export class InkCanvas {
     const canvases = [this.canvas, this.liveCanvas];
     if (viewport) {
       for (const canvas of canvases) {
-        canvas.style.inset = "auto";
-        canvas.style.left = `${viewport.offsetX}px`;
-        canvas.style.top = `${viewport.offsetY}px`;
-        canvas.style.width = `${viewport.width}px`;
-        canvas.style.height = `${viewport.height}px`;
+        canvas.setCssStyles({
+          inset: "auto",
+          left: `${viewport.offsetX}px`,
+          top: `${viewport.offsetY}px`,
+          width: `${viewport.width}px`,
+          height: `${viewport.height}px`
+        });
       }
     } else {
       for (const canvas of canvases) {
-        canvas.style.inset = "0";
-        canvas.style.left = "";
-        canvas.style.top = "";
-        canvas.style.width = "100%";
-        canvas.style.height = "100%";
+        canvas.setCssStyles({
+          inset: "0",
+          left: "",
+          top: "",
+          width: "100%",
+          height: "100%"
+        });
       }
     }
     if (this.selectionBounds && this.lassoPoints.length > 2) {
@@ -3364,7 +3355,6 @@ export class InkCanvas {
     }
 
     this.deferPendingDocumentPublish();
-    const hotPathStartedAt = performance.now();
     this.claimPencilEvent(event);
     this.activePointerId = event.pointerId;
     this.activePointerKind = "draw";
@@ -4779,14 +4769,7 @@ export class InkCanvas {
   }
 
   private isIosLike(): boolean {
-    const navigatorValue = globalThis.navigator;
-    if (!navigatorValue) {
-      return false;
-    }
-    return (
-      /iPad|iPhone|iPod/.test(navigatorValue.userAgent) ||
-      (navigatorValue.platform === "MacIntel" && navigatorValue.maxTouchPoints > 1)
-    );
+    return Platform.isIosApp;
   }
 
   private hasUsableCoordinates(event: PointerEvent): boolean {

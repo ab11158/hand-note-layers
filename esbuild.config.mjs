@@ -1,7 +1,7 @@
 import esbuild from "esbuild";
 import process from "process";
-import builtins from "builtin-modules";
 import { readFile } from "node:fs/promises";
+import { builtinModules } from "node:module";
 import { resolve } from "node:path";
 
 const workerDataUrlPlugin = {
@@ -36,6 +36,14 @@ const workerDataUrlPlugin = {
 };
 
 const production = process.argv[2] === "production";
+const builtins = builtinModules
+  .filter(
+    (moduleName) =>
+      !moduleName.startsWith("_") &&
+      !moduleName.includes("/") &&
+      moduleName !== "sys"
+  )
+  .sort();
 
 await esbuild.build({
   entryPoints: ["src/main.ts"],

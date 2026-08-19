@@ -1,5 +1,50 @@
 # HandLayers
 
+## Overview
+
+HandLayers is a free, open-source handwriting and drawing plugin for Markdown and
+PDF files. It is designed for desktop and iPad workflows, with a dedicated
+Apple Pencil input surface and layer-based annotation storage.
+
+## Features
+
+- Write with Apple Pencil or a mouse while using touch to navigate the page.
+- Annotate Markdown and PDF files without modifying their original contents.
+- Organize ink, text, shapes, and temporary whiteboards in editable layers.
+- Select, move, resize, rotate, copy, cut, paste, recolor, and export annotations.
+- Export annotated PDFs or ZIP packages containing complete layer data.
+
+## Installation
+
+Install HandLayers from the community plugin directory when the listing is
+available. For beta testing, install BRAT, run `BRAT: Add a beta plugin for
+testing`, and enter the GitHub repository `ab11158/hand-note-layers`.
+
+## Data and privacy
+
+HandLayers stores annotation JSON files inside the local vault under
+`.hand-note-layers`. It does not send note contents, handwriting, or PDF data to
+an external service. Exported files are written to the vault's
+`HandLayers 导出` directory.
+
+## Support and sponsorship
+
+All features are free to download and use. Sponsorship is voluntary and does
+not unlock features or change access to updates and support. The project can be
+supported through the funding link shown in the plugin directory and manifest.
+
+## Release notes
+
+### 0.10.5
+
+- Resolved the blocking community-review checks without changing the Pencil
+  writing pipeline.
+- Added reproducible dependency metadata and English project documentation.
+- Updated compatibility, command naming, and cleanup behavior recommended by
+  the community plugin review tools.
+
+## 中文说明
+
 HandLayers 是一个 Obsidian 插件，用于在 Markdown 和 PDF 文件上添加基于笔记层的手写标注。
 
 ## 功能
@@ -48,6 +93,7 @@ HandLayers 是一个 Obsidian 插件，用于在 Markdown 和 PDF 文件上添�
 - `0.10.2` 将插件显示名改为 HandLayers，精简图形菜单，增加常见教学图形和四种命令面板导出方式。
 - `0.10.3` 修复圆、椭圆和常见图形拖动起点漂移；折线驻留增加抗抖候选锚点，曲线改为经过三点确定；工具栏与选区菜单防溢出，并统一为 50% 半透明背景。
 - `0.10.4` 使用标准贝塞尔圆弧系数平滑圆与椭圆，并统一画布、SVG、PDF 和截屏导出的几何效果；同时增加爱发电自愿赞助入口并修正开源许可证署名。
+- `0.10.5` 修复社区插件自动审核阻断项，补充英文文档与可复现依赖配置；Apple Pencil 单一实时书写管线保持不变。
 - Pencil 同一帧的合并采样会批量绘制，避免逐采样点重复提交 Canvas。
 - Pencil 使用单一实时输入管线；即使上一笔状态异常，新落笔也会立即接管并完成上一笔，不阻塞连续书写。
 - Pencil 与手指平移共用稳定的指针捕获机制，同时保留新落笔接管保护，减少 iPad WebView 丢失笔画事件的概率。
@@ -72,7 +118,7 @@ HandLayers 是一个 Obsidian 插件，用于在 Markdown 和 PDF 文件上添�
 打开一个 Markdown 或 PDF 文件，然后：
 
 - 点击左侧 Ribbon 中的 `pen-tool` 图标。
-- 或执行命令 `用 HandLayers 标注当前文件`。
+- 或执行命令 `标注当前文件`。
 
 Markdown 文件会进入独立的标注视图。PDF 文件默认会使用 HandLayers 的 PDF 标注视图打开。
 
@@ -94,10 +140,10 @@ https://afdian.com/a/ab11158
 
 命令面板提供：
 
-- `HandLayers：导出当前 PDF（合并可见批注）`
-- `HandLayers：导出当前笔记所有图层 ZIP`
-- `HandLayers：导出整个仓库的批注 PDF`
-- `HandLayers：导出整个仓库的所有图层 ZIP`
+- `导出当前 PDF（合并可见批注）`
+- `导出当前笔记所有图层 ZIP`
+- `导出整个仓库的批注 PDF`
+- `导出整个仓库的所有图层 ZIP`
 
 导出结果保存在仓库的 `HandLayers 导出` 目录，包含源文件副本、
 完整图层数据和合并后的可见图层 SVG。未保存的临时白板不会进入导出，

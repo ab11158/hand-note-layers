@@ -18,7 +18,6 @@
   overflow-x: auto;
   overflow-y: hidden;
   padding: 8px 10px;
-  scrollbar-width: thin;
 }
 
 .hand-note-toolbar-group {
@@ -300,7 +299,26 @@
 
 .hand-note-canvas {
   cursor: crosshair;
+  height: 100%;
+  inset: 0;
+  pointer-events: auto;
+  position: absolute;
   touch-action: none;
+  width: 100%;
+  z-index: 3;
+}
+
+.hand-note-canvas.is-eraser {
+  cursor: cell;
+}
+
+.hand-note-canvas.is-hand {
+  cursor: grab;
+}
+
+.hand-note-live-canvas {
+  pointer-events: none;
+  z-index: 4;
 }
 
 .hand-note-selection-layer {
@@ -674,10 +692,6 @@
   position: absolute;
   top: 0;
   z-index: 1;
-}
-
-.hand-note-pdf-page .hand-note-canvas {
-  z-index: 3;
 }
 
 .hand-note-layer-panel {

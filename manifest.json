@@ -1,9 +1,9 @@
 {
   "id": "hand-note-layers",
   "name": "HandLayers",
-  "version": "0.10.4",
+  "version": "0.10.5",
   "minAppVersion": "1.4.0",
-  "description": "Layer-based handwriting annotations for Markdown and PDF files in Obsidian.",
+  "description": "Layer-based handwriting and drawing annotations for Markdown and PDF files, with Apple Pencil support.",
   "author": "ab11158",
   "authorUrl": "https://github.com/ab11158",
   "fundingUrl": {

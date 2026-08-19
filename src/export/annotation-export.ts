@@ -719,7 +719,7 @@ function buildZip(entries: ZipEntry[]): Uint8Array {
 }
 
 function safeFileName(value: string): string {
-  return value.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim() || "未命名图层";
+  return value.replace(/[<>:"/\\|?*\p{Cc}]/gu, "_").trim() || "未命名图层";
 }
 
 function singleLayerSvg(

@@ -369,7 +369,7 @@ export class PdfAnnotationView extends ItemView {
 
   private waitForLayout(): Promise<void> {
     return new Promise((resolve) => {
-      requestAnimationFrame(() => resolve());
+      window.requestAnimationFrame(() => resolve());
     });
   }
 
@@ -424,7 +424,7 @@ export class PdfAnnotationView extends ItemView {
 
   private renderPage(pageIndex: number): Promise<void> {
     const existing = this.pageRenderPromises.get(pageIndex);
-    if (existing) {
+    if (existing !== undefined) {
       return existing;
     }
 

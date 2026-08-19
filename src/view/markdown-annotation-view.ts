@@ -99,7 +99,7 @@ export class MarkdownAnnotationView extends ItemView {
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
         if (this.sourceFile && file.path === this.sourceFile.path) {
-          this.renderMarkdown();
+          void this.renderMarkdown();
         }
       })
     );
