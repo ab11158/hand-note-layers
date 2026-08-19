@@ -236,6 +236,7 @@ export class MarkdownAnnotationView extends ItemView {
     if (this.scrollContainer) {
       this.scrollContainer.removeEventListener("scroll", this.handleMarkdownScroll);
     }
+    this.annotationToolbar?.destroy();
     this.inkCanvas = null;
     this.workspaceViewport = null;
     this.layerPanel = null;

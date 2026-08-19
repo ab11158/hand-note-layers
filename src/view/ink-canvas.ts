@@ -77,6 +77,10 @@ export class InkCanvas {
   private static readonly MAX_LASSO_POINTS = 192;
   private static readonly PENCIL_COMPATIBILITY_GUARD_MS = 500;
   private static readonly SHAPE_DWELL_MS = 420;
+  private static readonly SHAPE_DWELL_JITTER_PX = 4;
+  private static readonly SHAPE_ANCHOR_EXIT_PX = 12;
+  private static readonly SHAPE_MIN_SIZE_PX = 6;
+  private static readonly SHAPE_CLOSE_PX = 14;
   private static readonly instances = new Set<InkCanvas>();
   private static selectionClipboard: {
     strokes: AnnotationStroke[];
@@ -130,6 +134,7 @@ export class InkCanvas {
   private activeStrokeLayerOpacity = 1;
   private activeStrokeIndex = -1;
   private activeStrokeDocument: AnnotationDocument | null = null;
+  private activeObjectStart: StrokePoint | null = null;
   private activeStrokePathLength = 0;
   private activeSmoothedPressure = 0.5;
   private lastStylusActivityAt = Number.NEGATIVE_INFINITY;
@@ -175,6 +180,15 @@ export class InkCanvas {
     current: StrokePoint;
     dwellAnchor: StrokePoint | null;
     timer: number | null;
+    timerOrigin: StrokePoint | null;
+  } | null = null;
+  private curveState: {
+    strokeId: string;
+    start: StrokePoint;
+    current: StrokePoint;
+    throughPoint: StrokePoint | null;
+    timer: number | null;
+    timerOrigin: StrokePoint | null;
   } | null = null;
   private textLongPress: {
     pointerId: number;
@@ -194,6 +208,7 @@ export class InkCanvas {
     timer: number;
   } | null = null;
   private readonly pastePrompt: HTMLButtonElement;
+  private readonly shapeDwellMarker: HTMLDivElement;
   private pastePromptPoint: StrokePoint | null = null;
   private selectionTransformState: {
     pointerId: number;
@@ -279,6 +294,10 @@ export class InkCanvas {
       this.pasteClipboard(point ?? undefined);
     });
     document.body.append(this.pastePrompt);
+    this.shapeDwellMarker = document.createElement("div");
+    this.shapeDwellMarker.className = "hand-note-shape-dwell-anchor";
+    this.shapeDwellMarker.setAttribute("aria-hidden", "true");
+    document.body.append(this.shapeDwellMarker);
     this.textEditorPortal = document.createElement("div");
     this.textEditorPortal.className = "hand-note-text-editor-portal";
     this.textEditor = document.createElement("textarea");
@@ -367,6 +386,7 @@ export class InkCanvas {
     this.cancelTextLongPress();
     this.cancelCanvasLongPress();
     this.clearPolylineState();
+    this.clearCurveState();
     this.finishShapeMove(false);
     InkCanvas.instances.delete(this);
     window.visualViewport?.removeEventListener("resize", this.positionTextEditor);
@@ -375,6 +395,7 @@ export class InkCanvas {
     this.selectionOverlay.destroy();
     this.shapeControls.remove();
     this.pastePrompt.remove();
+    this.shapeDwellMarker.remove();
     this.textEditorPortal.remove();
     this.liveCanvas.remove();
     if (this.interactionFrame !== null) {
@@ -402,6 +423,8 @@ export class InkCanvas {
     this.activeViewport = null;
     this.renderedPointCount = 0;
     this.pendingEraserPoints = [];
+    this.clearPolylineState();
+    this.clearCurveState();
     this.clearActiveStrokeMetadata();
     this.clearLiveCanvas();
     this.cancelSelection();
@@ -1862,7 +1885,11 @@ export class InkCanvas {
           : []
     );
     context.beginPath();
-    if ((stroke.shape === "curve" || stroke.shape === "connector-curve") && points.length >= 4) {
+    if (stroke.shape === "curve" && points.length === 3) {
+      const control = this.quadraticControlThrough(points[0], points[1], points[2]);
+      context.moveTo(points[0].x, points[0].y);
+      context.quadraticCurveTo(control.x, control.y, points[2].x, points[2].y);
+    } else if ((stroke.shape === "curve" || stroke.shape === "connector-curve") && points.length >= 4) {
       context.moveTo(points[0].x, points[0].y);
       context.bezierCurveTo(
         points[1].x,
@@ -1913,12 +1940,11 @@ export class InkCanvas {
     }
     context.stroke();
     context.setLineDash([]);
-    const firstAdjacent = (stroke.shape === "curve" || stroke.shape === "connector-curve") && points[1]
-      ? points[1]
-      : points[1];
-    const lastAdjacent = (stroke.shape === "curve" || stroke.shape === "connector-curve") && points.length >= 4
-      ? points[points.length - 2]
-      : points[points.length - 2];
+    const curveControl = stroke.shape === "curve" && points.length === 3
+      ? this.quadraticControlThrough(points[0], points[1], points[2])
+      : null;
+    const firstAdjacent = curveControl ?? points[1];
+    const lastAdjacent = curveControl ?? points[points.length - 2];
     const closedShape = stroke.closed || stroke.shape === "rectangle" || stroke.shape === "ellipse" || stroke.shape === "circle";
     if (!closedShape && firstAdjacent) {
       this.drawShapeArrow(context, points[0], firstAdjacent, stroke.startArrow ?? "none", stroke.size);
@@ -1932,6 +1958,17 @@ export class InkCanvas {
         stroke.size
       );
     }
+  }
+
+  private quadraticControlThrough(
+    start: { x: number; y: number },
+    through: { x: number; y: number },
+    end: { x: number; y: number }
+  ): { x: number; y: number } {
+    return {
+      x: 2 * through.x - (start.x + end.x) / 2,
+      y: 2 * through.y - (start.y + end.y) / 2
+    };
   }
 
   private drawShapeArrow(
@@ -2070,9 +2107,14 @@ export class InkCanvas {
   ): void {
     const viewport = this.activeViewport ?? this.currentViewport(this.canvas.getBoundingClientRect());
     const shapeKind = this.options.getShapeKind?.() ?? "rectangle";
+    if (tool === "shape") {
+      this.clearPolylineState();
+      this.clearCurveState();
+    }
     const end = tool === "text"
       ? this.defaultTextEnd(point, viewport)
       : { ...point };
+    this.activeObjectStart = { ...point };
     this.activeStrokeIndex = layer.strokes.length;
     this.activeStroke = {
       id: generateId(),
@@ -2082,7 +2124,9 @@ export class InkCanvas {
       opacity: 1,
       points:
         tool === "shape"
-          ? this.shapePoints(point, end, this.options.getShapeKind?.() ?? "rectangle")
+          ? shapeKind === "curve"
+            ? [{ ...point }, { ...end }]
+            : this.shapePoints(point, end, shapeKind)
           : this.rectanglePoints(this.boundsForPoints([point, end])),
       pageIndex: this.options.pageIndex,
       shape: tool === "shape" ? shapeKind : undefined,
@@ -2104,6 +2148,9 @@ export class InkCanvas {
     if (tool === "shape" && shapeKind === "line") {
       this.startPolylineState(this.activeStroke, point);
     }
+    if (tool === "shape" && shapeKind === "curve") {
+      this.startCurveState(this.activeStroke, point);
+    }
     if (tool === "shape" && this.isConnector(this.activeStroke)) {
       this.attachConnectorEndpoint(layer, this.activeStroke, "start");
     }
@@ -2117,13 +2164,15 @@ export class InkCanvas {
       return;
     }
     const point = this.pointFromEvent(event, this.activeRect, this.activeViewport);
-    const start = stroke.points[0];
+    const start = this.activeObjectStart ?? stroke.points[0];
     if (!start) {
       return;
     }
     if (stroke.tool === "shape") {
       if (this.polylineState?.strokeId === stroke.id) {
         this.updatePolylineShape(stroke, point);
+      } else if (this.curveState?.strokeId === stroke.id) {
+        this.updateCurveShape(stroke, point);
       } else {
         stroke.points = this.shapePoints(start, point, stroke.shape ?? "rectangle");
         const layer = this.activeStrokeLayerId
@@ -2152,6 +2201,9 @@ export class InkCanvas {
   ): StrokePoint[] {
     const point = (x: number, y: number): StrokePoint => ({ x, y, pressure: 0.5 });
     if (kind === "line" || kind === "polyline" || kind === "connector-straight") {
+      return [{ ...start }, { ...end }];
+    }
+    if (kind === "curve") {
       return [{ ...start }, { ...end }];
     }
     if (kind === "rectangle") {
@@ -2291,7 +2343,8 @@ export class InkCanvas {
       committed: [{ ...start }],
       current: { ...start },
       dwellAnchor: null,
-      timer: null
+      timer: null,
+      timerOrigin: null
     };
   }
 
@@ -2303,17 +2356,19 @@ export class InkCanvas {
       return;
     }
     state.current = { ...current };
-    if (state.timer !== null) {
+    if (
+      state.timer !== null &&
+      state.timerOrigin &&
+      this.shapePointDistance(current, state.timerOrigin, viewport) > InkCanvas.SHAPE_DWELL_JITTER_PX
+    ) {
       window.clearTimeout(state.timer);
       state.timer = null;
+      state.timerOrigin = null;
     }
     if (state.dwellAnchor) {
       const anchor = state.dwellAnchor;
-      const distance = Math.hypot(
-        (current.x - anchor.x) * viewport.documentWidth,
-        (current.y - anchor.y) * viewport.documentHeight
-      );
-      if (distance >= 12) {
+      const distance = this.shapePointDistance(current, anchor, viewport);
+      if (distance >= InkCanvas.SHAPE_ANCHOR_EXIT_PX) {
         const previous = state.committed[state.committed.length - 1];
         const incoming = Math.atan2(
           (anchor.y - previous.y) * viewport.documentHeight,
@@ -2328,13 +2383,13 @@ export class InkCanvas {
           state.committed.push({ ...anchor });
         }
         state.dwellAnchor = null;
+        state.timerOrigin = null;
+        this.hideShapeDwellMarker();
       }
     }
     const first = state.committed[0];
-    const canClose = state.committed.length >= 3 && Math.hypot(
-      (current.x - first.x) * viewport.documentWidth,
-      (current.y - first.y) * viewport.documentHeight
-    ) <= 10;
+    const canClose = state.committed.length >= 3 &&
+      this.shapePointDistance(current, first, viewport) <= InkCanvas.SHAPE_CLOSE_PX;
     const preview = canClose ? { ...first } : { ...current };
     stroke.closed = canClose || undefined;
     stroke.points = [...state.committed.map((point) => ({ ...point })), preview];
@@ -2348,13 +2403,34 @@ export class InkCanvas {
     if (!state || state.strokeId !== stroke.id || state.dwellAnchor || stroke.closed) {
       return;
     }
+    if (state.timer !== null) {
+      return;
+    }
+    const viewport = this.activeViewport;
+    const previous = state.committed[state.committed.length - 1];
+    if (
+      !viewport ||
+      this.shapePointDistance(state.current, previous, viewport) < InkCanvas.SHAPE_MIN_SIZE_PX
+    ) {
+      return;
+    }
+    state.timerOrigin = { ...state.current };
     state.timer = window.setTimeout(() => {
       const current = this.polylineState;
-      if (!current || current.strokeId !== stroke.id) {
+      const currentViewport = this.activeViewport;
+      if (!current || current.strokeId !== stroke.id || !currentViewport || !current.timerOrigin) {
         return;
       }
       current.timer = null;
+      if (
+        this.shapePointDistance(current.current, current.timerOrigin, currentViewport) >
+        InkCanvas.SHAPE_DWELL_JITTER_PX
+      ) {
+        current.timerOrigin = null;
+        return;
+      }
       current.dwellAnchor = { ...current.current };
+      this.showShapeDwellMarker(current.dwellAnchor);
     }, InkCanvas.SHAPE_DWELL_MS);
   }
 
@@ -2370,15 +2446,10 @@ export class InkCanvas {
     const first = points[0];
     const current = state.current;
     const viewport = this.activeViewport ?? this.currentViewport(this.canvas.getBoundingClientRect());
-    const closes = points.length >= 3 && Math.hypot(
-      (current.x - first.x) * viewport.documentWidth,
-      (current.y - first.y) * viewport.documentHeight
-    ) <= 10;
+    const closes = points.length >= 3 &&
+      this.shapePointDistance(current, first, viewport) <= InkCanvas.SHAPE_CLOSE_PX;
     const last = points[points.length - 1];
-    if (!closes && Math.hypot(
-      (current.x - last.x) * viewport.documentWidth,
-      (current.y - last.y) * viewport.documentHeight
-    ) >= 1) {
+    if (!closes && this.shapePointDistance(current, last, viewport) >= 1) {
       points.push({ ...current });
     }
     stroke.points = points.length >= 2 ? points : [{ ...first }, { ...current }];
@@ -2386,6 +2457,7 @@ export class InkCanvas {
     stroke.closed = closes || undefined;
     this.strokeBounds.delete(stroke);
     this.polylineState = null;
+    this.hideShapeDwellMarker();
   }
 
   private clearPolylineState(): void {
@@ -2393,6 +2465,134 @@ export class InkCanvas {
       window.clearTimeout(this.polylineState.timer);
     }
     this.polylineState = null;
+    this.hideShapeDwellMarker();
+  }
+
+  private startCurveState(stroke: AnnotationStroke, start: StrokePoint): void {
+    this.clearCurveState();
+    this.curveState = {
+      strokeId: stroke.id,
+      start: { ...start },
+      current: { ...start },
+      throughPoint: null,
+      timer: null,
+      timerOrigin: null
+    };
+  }
+
+  private updateCurveShape(stroke: AnnotationStroke, current: StrokePoint): void {
+    const state = this.curveState;
+    const viewport = this.activeViewport;
+    if (!state || state.strokeId !== stroke.id || !viewport) {
+      stroke.points = [{ ...(this.activeObjectStart ?? stroke.points[0]) }, { ...current }];
+      return;
+    }
+    state.current = { ...current };
+    if (
+      state.timer !== null &&
+      state.timerOrigin &&
+      this.shapePointDistance(current, state.timerOrigin, viewport) > InkCanvas.SHAPE_DWELL_JITTER_PX
+    ) {
+      window.clearTimeout(state.timer);
+      state.timer = null;
+      state.timerOrigin = null;
+    }
+    stroke.points = state.throughPoint
+      ? [{ ...state.start }, { ...state.throughPoint }, { ...current }]
+      : [{ ...state.start }, { ...current }];
+    this.strokeBounds.delete(stroke);
+    if (!state.throughPoint) {
+      this.scheduleCurveDwell(stroke);
+    }
+  }
+
+  private scheduleCurveDwell(stroke: AnnotationStroke): void {
+    const state = this.curveState;
+    const viewport = this.activeViewport;
+    if (!state || state.strokeId !== stroke.id || state.throughPoint || state.timer !== null || !viewport) {
+      return;
+    }
+    if (this.shapePointDistance(state.start, state.current, viewport) < InkCanvas.SHAPE_MIN_SIZE_PX) {
+      return;
+    }
+    state.timerOrigin = { ...state.current };
+    state.timer = window.setTimeout(() => {
+      const current = this.curveState;
+      const currentViewport = this.activeViewport;
+      if (!current || current.strokeId !== stroke.id || !currentViewport || !current.timerOrigin) {
+        return;
+      }
+      current.timer = null;
+      if (
+        this.shapePointDistance(current.current, current.timerOrigin, currentViewport) >
+        InkCanvas.SHAPE_DWELL_JITTER_PX
+      ) {
+        current.timerOrigin = null;
+        return;
+      }
+      current.throughPoint = { ...current.current };
+      stroke.points = [
+        { ...current.start },
+        { ...current.throughPoint },
+        { ...current.current }
+      ];
+      this.strokeBounds.delete(stroke);
+      this.showShapeDwellMarker(current.throughPoint);
+      this.render();
+    }, InkCanvas.SHAPE_DWELL_MS);
+  }
+
+  private finalizeCurveStroke(stroke: AnnotationStroke): boolean {
+    const state = this.curveState;
+    const viewport = this.activeViewport ?? this.currentViewport(this.canvas.getBoundingClientRect());
+    if (!state || state.strokeId !== stroke.id || !state.throughPoint) {
+      this.clearCurveState();
+      return false;
+    }
+    const valid =
+      this.shapePointDistance(state.start, state.throughPoint, viewport) >= InkCanvas.SHAPE_MIN_SIZE_PX &&
+      this.shapePointDistance(state.throughPoint, state.current, viewport) >= InkCanvas.SHAPE_MIN_SIZE_PX;
+    if (valid) {
+      stroke.points = [
+        { ...state.start },
+        { ...state.throughPoint },
+        { ...state.current }
+      ];
+      this.strokeBounds.delete(stroke);
+    }
+    this.clearCurveState();
+    return valid;
+  }
+
+  private clearCurveState(): void {
+    if (this.curveState?.timer !== null && this.curveState?.timer !== undefined) {
+      window.clearTimeout(this.curveState.timer);
+    }
+    this.curveState = null;
+    this.hideShapeDwellMarker();
+  }
+
+  private shapePointDistance(
+    first: StrokePoint,
+    second: StrokePoint,
+    viewport: InkCanvasViewport
+  ): number {
+    return Math.hypot(
+      (first.x - second.x) * viewport.documentWidth,
+      (first.y - second.y) * viewport.documentHeight
+    );
+  }
+
+  private showShapeDwellMarker(point: StrokePoint): void {
+    const rect = this.activeRect ?? this.canvas.getBoundingClientRect();
+    const viewport = this.activeViewport ?? this.currentViewport(rect);
+    this.shapeDwellMarker.style.left = `${rect.left + point.x * viewport.documentWidth - viewport.offsetX}px`;
+    this.shapeDwellMarker.style.top = `${rect.top + point.y * viewport.documentHeight - viewport.offsetY}px`;
+    this.shapeDwellMarker.classList.add("is-visible");
+  }
+
+  private hideShapeDwellMarker(): void {
+    this.shapeDwellMarker.classList.remove("is-visible");
   }
 
   private isConnector(stroke: AnnotationStroke): boolean {
@@ -3110,7 +3310,11 @@ export class InkCanvas {
         return;
       }
       if (this.activePointerKind === "draw" && this.activeStroke) {
-        this.finalizeActiveStroke();
+        if (this.activeStroke.tool === "shape") {
+          this.discardActiveStroke();
+        } else {
+          this.finalizeActiveStroke();
+        }
       } else {
         const stalePointerId = this.activePointerId;
         this.resetPointerState();
@@ -3121,7 +3325,8 @@ export class InkCanvas {
     }
 
     this.stopPanInertia();
-    if (event.pointerType === "touch") {
+    const requestedTool = this.options.getTool();
+    if (event.pointerType === "touch" && requestedTool !== "shape") {
       event.preventDefault();
       this.canvas.setPointerCapture(event.pointerId);
       this.activePointerId = event.pointerId;
@@ -3144,7 +3349,7 @@ export class InkCanvas {
       return;
     }
 
-    const tool = this.options.getTool();
+    const tool = requestedTool;
     if (tool === "hand") {
       return;
     }
@@ -3164,6 +3369,9 @@ export class InkCanvas {
     this.activePointerKind = "draw";
     this.activeInputChannel = inputChannel;
     this.activeTool = tool;
+    if (event.pointerType === "touch") {
+      this.canvas.setPointerCapture(event.pointerId);
+    }
     this.options.onActivate?.();
     this.activeRect = this.cachedRect ?? this.canvas.getBoundingClientRect();
     this.cachedRect = this.activeRect;
@@ -3397,7 +3605,13 @@ export class InkCanvas {
       const stroke = this.activeStroke;
       const layerId = this.activeStrokeLayerId;
       this.updateObjectStroke(event);
-      this.finalizePolylineStroke(stroke);
+      const valid = stroke.shape === "curve"
+        ? this.finalizeCurveStroke(stroke)
+        : this.finalizeShapeStroke(stroke);
+      if (!valid) {
+        this.discardActiveStroke();
+        return;
+      }
       if (layerId && this.isConnector(stroke)) {
         const layer = this.options.getDocument().layers.find((item) => item.id === layerId);
         if (layer) {
@@ -3461,9 +3675,17 @@ export class InkCanvas {
     this.cancelTextLongPress();
     this.cancelCanvasLongPress();
     this.clearPolylineState();
+    this.clearCurveState();
     if (this.shapeMoveState) {
       this.finishShapeMove(true);
       this.finishNonStrokeInteraction(false);
+      return;
+    }
+    if (
+      this.activePointerKind === "draw" &&
+      this.activeStroke?.tool === "shape"
+    ) {
+      this.discardActiveStroke();
       return;
     }
     if (this.activePointerKind === "draw" && this.activeStroke) {
@@ -3550,6 +3772,45 @@ export class InkCanvas {
     this.clearActiveStrokeMetadata();
     this.options.onInteraction?.("stroke-end");
     this.scheduleDocumentPublish(document, false, true);
+  }
+
+  private finalizeShapeStroke(stroke: AnnotationStroke): boolean {
+    if (this.polylineState?.strokeId === stroke.id) {
+      this.finalizePolylineStroke(stroke);
+    }
+    const viewport = this.activeViewport ?? this.currentViewport(this.canvas.getBoundingClientRect());
+    const bounds = this.boundsForPoints(stroke.points);
+    const width = (bounds.maxX - bounds.minX) * viewport.documentWidth;
+    const height = (bounds.maxY - bounds.minY) * viewport.documentHeight;
+    if (stroke.shape === "line" || stroke.shape === "polyline") {
+      return Math.max(width, height) >= InkCanvas.SHAPE_MIN_SIZE_PX;
+    }
+    return width >= InkCanvas.SHAPE_MIN_SIZE_PX && height >= InkCanvas.SHAPE_MIN_SIZE_PX;
+  }
+
+  private discardActiveStroke(): void {
+    const stroke = this.activeStroke;
+    const document = this.activeStrokeDocument ?? this.options.getDocument();
+    const pointerId = this.activePointerId;
+    if (stroke) {
+      const layer = document.layers.find((item) => item.id === this.activeStrokeLayerId);
+      if (layer) {
+        const index = layer.strokes.findIndex((item) => item.id === stroke.id);
+        if (index >= 0) {
+          layer.strokes.splice(index, 1);
+        }
+      }
+    }
+    this.clearPolylineState();
+    this.clearCurveState();
+    this.activeStroke = null;
+    this.clearActiveStrokeMetadata();
+    this.resetPointerState();
+    if (pointerId !== null && this.canvas.hasPointerCapture(pointerId)) {
+      this.canvas.releasePointerCapture(pointerId);
+    }
+    this.render();
+    this.resumePendingDocumentPublish();
   }
 
   private startPanInertia(velocityX: number, velocityY: number): void {
@@ -3692,9 +3953,10 @@ export class InkCanvas {
     const pixelX = point.x * viewport.documentWidth;
     const pixelY = point.y * viewport.documentHeight;
 
-    for (let index = 1; index < stroke.points.length; index += 1) {
-      const start = stroke.points[index - 1];
-      const end = stroke.points[index];
+    const geometryPoints = this.strokeGeometryPoints(stroke);
+    for (let index = 1; index < geometryPoints.length; index += 1) {
+      const start = geometryPoints[index - 1];
+      const end = geometryPoints[index];
       const distance = this.distanceToSegment(
         pixelX,
         pixelY,
@@ -3723,14 +3985,31 @@ export class InkCanvas {
       }
     }
 
-    if (stroke.points.length === 1) {
-      const start = stroke.points[0];
+    if (geometryPoints.length === 1) {
+      const start = geometryPoints[0];
       const dx = pixelX - start.x * viewport.documentWidth;
       const dy = pixelY - start.y * viewport.documentHeight;
       return Math.sqrt(dx * dx + dy * dy) <= radius;
     }
 
     return false;
+  }
+
+  private strokeGeometryPoints(stroke: AnnotationStroke): StrokePoint[] {
+    if (stroke.shape !== "curve" || stroke.points.length !== 3) {
+      return stroke.points;
+    }
+    const [start, through, end] = stroke.points;
+    const control = this.quadraticControlThrough(start, through, end);
+    return Array.from({ length: 17 }, (_, index) => {
+      const t = index / 16;
+      const inverse = 1 - t;
+      return {
+        x: inverse * inverse * start.x + 2 * inverse * t * control.x + t * t * end.x,
+        y: inverse * inverse * start.y + 2 * inverse * t * control.y + t * t * end.y,
+        pressure: 0.5
+      };
+    });
   }
 
   private distanceToSegment(
@@ -4831,8 +5110,10 @@ export class InkCanvas {
     this.activeStrokeLayerOpacity = 1;
     this.activeStrokeIndex = -1;
     this.activeStrokeDocument = null;
+    this.activeObjectStart = null;
     this.activeStrokePathLength = 0;
     this.activeSmoothedPressure = 0.5;
+    this.hideShapeDwellMarker();
   }
 
   private needsLayerOrderRefresh(document: AnnotationDocument): boolean {
@@ -4869,7 +5150,7 @@ export class InkCanvas {
     let minY = 1;
     let maxX = 0;
     let maxY = 0;
-    for (const point of stroke.points) {
+    for (const point of this.strokeGeometryPoints(stroke)) {
       minX = Math.min(minX, point.x);
       minY = Math.min(minY, point.y);
       maxX = Math.max(maxX, point.x);

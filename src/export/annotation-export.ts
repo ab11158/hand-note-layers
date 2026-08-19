@@ -51,10 +51,25 @@ interface ExportPoint {
   y: number;
 }
 
+function quadraticControlThrough(
+  start: ExportPoint,
+  through: ExportPoint,
+  end: ExportPoint
+): ExportPoint {
+  return {
+    x: 2 * through.x - (start.x + end.x) / 2,
+    y: 2 * through.y - (start.y + end.y) / 2
+  };
+}
+
 function shapePathData(
   stroke: AnnotationDocument["layers"][number]["strokes"][number],
   points: ExportPoint[]
 ): string {
+  if (stroke.shape === "curve" && points.length === 3) {
+    const control = quadraticControlThrough(points[0], points[1], points[2]);
+    return `M${points[0].x},${points[0].y} Q${control.x},${control.y} ${points[2].x},${points[2].y}`;
+  }
   if ((stroke.shape === "curve" || stroke.shape === "connector-curve") && points.length >= 4) {
     return `M${points[0].x},${points[0].y} C${points[1].x},${points[1].y} ${points[2].x},${points[2].y} ${points[3].x},${points[3].y}`;
   }
@@ -413,7 +428,11 @@ function drawCanvasStroke(
             : []
       );
       context.beginPath();
-      if ((stroke.shape === "curve" || stroke.shape === "connector-curve") && points.length >= 4) {
+      if (stroke.shape === "curve" && points.length === 3) {
+        const control = quadraticControlThrough(points[0], points[1], points[2]);
+        context.moveTo(points[0].x, points[0].y);
+        context.quadraticCurveTo(control.x, control.y, points[2].x, points[2].y);
+      } else if ((stroke.shape === "curve" || stroke.shape === "connector-curve") && points.length >= 4) {
         context.moveTo(points[0].x, points[0].y);
         context.bezierCurveTo(
           points[1].x,

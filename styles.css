@@ -56,9 +56,10 @@
 
 .hand-note-eraser-menu {
   align-items: center;
-  background: var(--background-modifier-hover);
+  background: rgba(30, 30, 30, 0.5);
   border: 1px solid var(--background-modifier-border);
   border-radius: 6px;
+  box-sizing: border-box;
   display: none;
   flex: 0 0 auto;
   flex-wrap: wrap;
@@ -111,7 +112,7 @@
 
 .hand-note-shape-menu {
   display: none;
-  grid-template-columns: repeat(2, minmax(138px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   width: min(340px, calc(100vw - 16px));
 }
 
@@ -121,12 +122,17 @@
 
 .hand-note-common-shape-menu {
   display: none;
-  grid-template-columns: repeat(2, minmax(128px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   width: min(320px, calc(100vw - 16px));
 }
 
 .hand-note-common-shape-menu.is-open {
   display: grid;
+}
+
+.hand-note-shape-menu.is-compact,
+.hand-note-common-shape-menu.is-compact {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .hand-note-menu-heading {
@@ -135,6 +141,21 @@
   font-weight: var(--font-semibold);
   grid-column: 1 / -1;
   padding: 5px 8px 2px;
+}
+
+.hand-note-line-style-sample {
+  border-top: 2px solid currentColor;
+  flex: 0 0 32px;
+  height: 0;
+  width: 32px;
+}
+
+.hand-note-line-style-sample[data-line-style="dotted"] {
+  border-top-style: dotted;
+}
+
+.hand-note-line-style-sample[data-line-style="dashed"] {
+  border-top-style: dashed;
 }
 
 .hand-note-export-menu {
@@ -806,6 +827,24 @@
   z-index: 1003;
 }
 
+.hand-note-shape-dwell-anchor {
+  background: color-mix(in srgb, var(--interactive-accent) 22%, transparent);
+  border: 2px solid var(--interactive-accent);
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--background-primary), var(--shadow-s);
+  display: none;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  pointer-events: none;
+  position: fixed;
+  width: 14px;
+  z-index: 1300;
+}
+
+.hand-note-shape-dwell-anchor.is-visible {
+  display: block;
+}
+
 .hand-note-shape-anchor {
   appearance: none;
   background: transparent;
@@ -917,18 +956,27 @@
 
 .hand-note-eraser-menu,
 .hand-note-selection-menu,
-.hand-note-selection-font-control,
 .hand-note-whiteboard-controls,
 .hand-note-dwell-tooltip,
 .hand-note-canvas-paste-prompt,
 .hand-note-text-editor-portal {
   -webkit-backdrop-filter: blur(8px);
   backdrop-filter: blur(8px);
-  background: color-mix(in srgb, var(--background-primary) 50%, transparent);
+  background: rgba(30, 30, 30, 0.5);
 }
 
+.hand-note-selection-font-control,
 .hand-note-text-editor {
-  background: color-mix(in srgb, var(--background-secondary) 50%, transparent);
+  background: transparent;
+}
+
+.theme-light .hand-note-eraser-menu,
+.theme-light .hand-note-selection-menu,
+.theme-light .hand-note-whiteboard-controls,
+.theme-light .hand-note-dwell-tooltip,
+.theme-light .hand-note-canvas-paste-prompt,
+.theme-light .hand-note-text-editor-portal {
+  background: rgba(255, 255, 255, 0.5);
 }
 
 .hand-note-layer-footer {

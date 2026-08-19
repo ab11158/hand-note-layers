@@ -254,14 +254,27 @@ export class SelectionOverlay {
 
     this.menu.classList.add("is-visible");
     const measuredMenu = this.menu.getBoundingClientRect();
-    const menuWidth = Math.min(measuredMenu.width, Math.max(0, canvasRect.width - 16));
-    const menuLeft = Math.max(8, Math.min(canvasRect.width - menuWidth - 8, left + width - menuWidth));
-    const menuHeight = Math.min(measuredMenu.height, Math.max(0, canvasRect.height - 16));
-    const menuTop = top >= menuHeight + 8
+    const visualViewport = window.visualViewport;
+    const viewportLeft = visualViewport?.offsetLeft ?? 0;
+    const viewportTop = visualViewport?.offsetTop ?? 0;
+    const viewportRight = viewportLeft + (visualViewport?.width ?? window.innerWidth);
+    const viewportBottom = viewportTop + (visualViewport?.height ?? window.innerHeight);
+    const visibleLeft = Math.max(8, viewportLeft - canvasRect.left + 8);
+    const visibleTop = Math.max(8, viewportTop - canvasRect.top + 8);
+    const visibleRight = Math.min(canvasRect.width - 8, viewportRight - canvasRect.left - 8);
+    const visibleBottom = Math.min(canvasRect.height - 8, viewportBottom - canvasRect.top - 8);
+    const menuWidth = Math.min(measuredMenu.width, Math.max(0, visibleRight - visibleLeft));
+    const menuLeft = Math.max(
+      visibleLeft,
+      Math.min(visibleRight - menuWidth, left + width - menuWidth)
+    );
+    const menuHeight = Math.min(measuredMenu.height, Math.max(0, visibleBottom - visibleTop));
+    const menuTop = top >= visibleTop + menuHeight + 6
       ? top - menuHeight - 6
-      : Math.min(canvasRect.height - menuHeight - 8, top + height + 8);
+      : Math.min(visibleBottom - menuHeight, top + height + 8);
+    this.menu.style.maxWidth = `${Math.max(160, visibleRight - visibleLeft)}px`;
     this.menu.style.left = `${menuLeft}px`;
-    this.menu.style.top = `${Math.max(8, menuTop)}px`;
+    this.menu.style.top = `${Math.max(visibleTop, menuTop)}px`;
     this.transformBox.style.left = `${left}px`;
     this.transformBox.style.top = `${top}px`;
     this.transformBox.style.width = `${width}px`;

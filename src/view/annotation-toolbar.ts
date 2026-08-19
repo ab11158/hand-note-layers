@@ -104,6 +104,7 @@ export class AnnotationToolbar {
   private readonly shapeKindButtons = new Map<ShapeKind, HTMLButtonElement>();
   private readonly shapeLineStyleButtons = new Map<ShapeLineStyle, HTMLButtonElement>();
   private readonly floatingMenuHomes = new Map<HTMLElement, HTMLElement>();
+  private activeFloatingMenu: { menu: HTMLElement; anchor: HTMLElement } | null = null;
   private readonly pasteButton: HTMLButtonElement;
   private currentShapeKind: ShapeKind;
   private currentShapeLineStyle: ShapeLineStyle;
@@ -146,11 +147,11 @@ export class AnnotationToolbar {
       this.createShapeKindButton("ellipse", "椭圆", "circle"),
       this.createShapeKindButton("circle", "圆", "circle-dot"),
       this.createShapeKindButton("rectangle", "矩形", "square"),
-      this.createShapeKindButton("curve", "光滑曲线", "activity"),
+      this.createShapeKindButton("curve", "三点曲线", "activity"),
       this.createMenuHeading("线型"),
-      this.createShapeLineStyleButton("solid", "实线", "minus"),
-      this.createShapeLineStyleButton("dotted", "点线", "more-horizontal"),
-      this.createShapeLineStyleButton("dashed", "虚线", "ellipsis")
+      this.createShapeLineStyleButton("solid", "实线"),
+      this.createShapeLineStyleButton("dotted", "点线"),
+      this.createShapeLineStyleButton("dashed", "虚线")
     );
     this.commonShapeMenu = document.createElement("div");
     this.commonShapeMenu.className = "hand-note-eraser-menu hand-note-common-shape-menu";
@@ -364,6 +365,22 @@ export class AnnotationToolbar {
     this.setShapeFillEnabled(options.initialShapeFillEnabled);
     this.setPasteEnabled(false);
     this.setSaveStatus("saved");
+    this.element.addEventListener("scroll", this.positionActiveFloatingMenu, {
+      passive: true
+    });
+    window.addEventListener("resize", this.positionActiveFloatingMenu);
+    window.visualViewport?.addEventListener("resize", this.positionActiveFloatingMenu);
+    window.visualViewport?.addEventListener("scroll", this.positionActiveFloatingMenu);
+    document.addEventListener("pointerdown", this.handleDocumentPointerDown, true);
+  }
+
+  destroy(): void {
+    this.closeAllFloatingMenus();
+    this.element.removeEventListener("scroll", this.positionActiveFloatingMenu);
+    window.removeEventListener("resize", this.positionActiveFloatingMenu);
+    window.visualViewport?.removeEventListener("resize", this.positionActiveFloatingMenu);
+    window.visualViewport?.removeEventListener("scroll", this.positionActiveFloatingMenu);
+    document.removeEventListener("pointerdown", this.handleDocumentPointerDown, true);
   }
 
   setTool(tool: AnnotationTool): void {
@@ -590,17 +607,19 @@ export class AnnotationToolbar {
 
   private createShapeLineStyleButton(
     style: ShapeLineStyle,
-    label: string,
-    icon: string
+    label: string
   ): HTMLButtonElement {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "hand-note-eraser-option";
-    setIcon(button, icon);
     setControlTooltip(button, label);
+    const sample = document.createElement("span");
+    sample.className = "hand-note-line-style-sample";
+    sample.dataset.lineStyle = style;
+    sample.setAttribute("aria-hidden", "true");
     const text = document.createElement("span");
     text.textContent = label;
-    button.append(text);
+    button.append(sample, text);
     button.addEventListener("click", (event) => {
       event.stopPropagation();
       this.options.onShapeLineStyleChange(style);
@@ -750,33 +769,78 @@ export class AnnotationToolbar {
     if (home && !this.floatingMenuHomes.has(menu)) {
       this.floatingMenuHomes.set(menu, home);
     }
-    (this.element.parentElement ?? document.body).append(menu);
+    document.body.append(menu);
     menu.classList.add("is-open");
+    this.activeFloatingMenu = { menu, anchor };
+    this.positionFloatingMenu(menu, anchor);
+    window.requestAnimationFrame(() => {
+      if (this.activeFloatingMenu?.menu === menu) {
+        this.positionFloatingMenu(menu, anchor);
+      }
+    });
+  }
+
+  private positionFloatingMenu(menu: HTMLElement, anchor: HTMLElement): void {
+    if (!menu.classList.contains("is-open") || !anchor.isConnected) {
+      return;
+    }
     const anchorRect = anchor.getBoundingClientRect();
-    const menuRect = menu.getBoundingClientRect();
     const visualViewport = window.visualViewport;
     const viewportLeft = visualViewport?.offsetLeft ?? 0;
     const viewportTop = visualViewport?.offsetTop ?? 0;
     const viewportWidth = visualViewport?.width ?? window.innerWidth;
     const viewportHeight = visualViewport?.height ?? window.innerHeight;
+    const viewRect = this.element.closest<HTMLElement>(".hand-note-view")
+      ?.getBoundingClientRect();
+    const boundaryLeft = Math.max(viewportLeft, viewRect?.left ?? viewportLeft) + 8;
+    const boundaryTop = Math.max(viewportTop, viewRect?.top ?? viewportTop) + 8;
+    const boundaryRight = Math.min(
+      viewportLeft + viewportWidth,
+      viewRect?.right ?? viewportLeft + viewportWidth
+    ) - 8;
+    const boundaryBottom = Math.min(
+      viewportTop + viewportHeight,
+      viewRect?.bottom ?? viewportTop + viewportHeight
+    ) - 8;
+    const availableWidth = Math.max(160, boundaryRight - boundaryLeft);
+    menu.style.maxWidth = `${availableWidth}px`;
+    menu.style.maxHeight = `${Math.max(80, boundaryBottom - boundaryTop)}px`;
+    menu.classList.toggle("is-compact", availableWidth < 280);
+    const menuRect = menu.getBoundingClientRect();
     const left = Math.max(
-      viewportLeft + 8,
+      boundaryLeft,
       Math.min(
-        viewportLeft + viewportWidth - menuRect.width - 8,
+        boundaryRight - menuRect.width,
         anchorRect.left + anchorRect.width / 2 - menuRect.width / 2
       )
     );
     const above = anchorRect.top - menuRect.height - 6;
-    const below = anchorRect.bottom + 6;
-    const top = above >= viewportTop + 8
-      ? above
-      : Math.max(
-          viewportTop + 8,
-          Math.min(viewportTop + viewportHeight - menuRect.height - 8, below)
-        );
+    const top = Math.max(
+      boundaryTop,
+      Math.min(boundaryBottom - menuRect.height, above)
+    );
     menu.style.left = `${left}px`;
     menu.style.top = `${top}px`;
   }
+
+  private readonly positionActiveFloatingMenu = (): void => {
+    const active = this.activeFloatingMenu;
+    if (active) {
+      this.positionFloatingMenu(active.menu, active.anchor);
+    }
+  };
+
+  private readonly handleDocumentPointerDown = (event: PointerEvent): void => {
+    const active = this.activeFloatingMenu;
+    const target = event.target;
+    if (!active || !(target instanceof Node)) {
+      return;
+    }
+    if (active.menu.contains(target) || active.anchor.contains(target)) {
+      return;
+    }
+    this.closeAllFloatingMenus();
+  };
 
   private closeAllFloatingMenus(): void {
     for (const menu of this.floatingMenuHomes.keys()) {
@@ -786,6 +850,14 @@ export class AnnotationToolbar {
 
   private closeFloatingMenu(menu: HTMLElement): void {
     menu.classList.remove("is-open");
+    menu.classList.remove("is-compact");
+    menu.style.removeProperty("left");
+    menu.style.removeProperty("top");
+    menu.style.removeProperty("max-width");
+    menu.style.removeProperty("max-height");
+    if (this.activeFloatingMenu?.menu === menu) {
+      this.activeFloatingMenu = null;
+    }
     const home = this.floatingMenuHomes.get(menu);
     if (home?.isConnected && menu.parentElement !== home) {
       home.append(menu);

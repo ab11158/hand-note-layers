@@ -224,6 +224,7 @@ export class PdfAnnotationView extends ItemView {
     this.pageRenderPromises.clear();
     await this.pdfDocument?.destroy();
     this.pdfDocument = null;
+    this.annotationToolbar?.destroy();
     this.layerPanel = null;
     this.annotationToolbar = null;
     this.document = null;
@@ -315,7 +316,7 @@ export class PdfAnnotationView extends ItemView {
       onClear: () => this.currentInkCanvas()?.clearActiveLayer(),
       onSave: () => void this.flushSave(),
       onExport: (mode) => void this.exportDocument(mode),
-      exportPrimaryLabel: "PDF 导出",
+      exportPrimaryLabel: "合并 PDF",
       onLayers: () => {
         this.toggleLayerPanel(!this.layerPanel?.element.classList.contains("is-open"));
       },

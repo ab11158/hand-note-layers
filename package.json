@@ -1,6 +1,6 @@
 {
   "name": "handlayers",
-  "version": "0.10.2",
+  "version": "0.10.3",
   "description": "Layer-based handwriting annotations for Markdown and PDF files in Obsidian.",
   "main": "main.js",
   "scripts": {
