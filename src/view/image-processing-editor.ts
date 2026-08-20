@@ -70,6 +70,67 @@ function copyImageData(value: ImageData): ImageData {
   return new ImageData(new Uint8ClampedArray(value.data), value.width, value.height);
 }
 
+export function estimateBackgroundColor(
+  canvas: HTMLCanvasElement,
+  excluded?: { x: number; y: number; width: number; height: number }
+): string {
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context || canvas.width < 1 || canvas.height < 1) return "#ffffff";
+  let pixels: ImageData;
+  try {
+    pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+  } catch {
+    return "#ffffff";
+  }
+  const buckets = new Map<string, { count: number; red: number; green: number; blue: number }>();
+  const step = Math.max(1, Math.floor(Math.max(canvas.width, canvas.height) / 320));
+  const add = (x: number, y: number) => {
+    if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) return;
+    const offset = (Math.floor(y) * canvas.width + Math.floor(x)) * 4;
+    if (pixels.data[offset + 3] < 200) return;
+    const red = pixels.data[offset];
+    const green = pixels.data[offset + 1];
+    const blue = pixels.data[offset + 2];
+    const key = `${red >> 4},${green >> 4},${blue >> 4}`;
+    const bucket = buckets.get(key) ?? { count: 0, red: 0, green: 0, blue: 0 };
+    bucket.count += 1;
+    bucket.red += red;
+    bucket.green += green;
+    bucket.blue += blue;
+    buckets.set(key, bucket);
+  };
+  if (excluded) {
+    const margin = Math.max(8, step * 3);
+    const left = Math.max(0, Math.floor(excluded.x - margin));
+    const top = Math.max(0, Math.floor(excluded.y - margin));
+    const right = Math.min(canvas.width, Math.ceil(excluded.x + excluded.width + margin));
+    const bottom = Math.min(canvas.height, Math.ceil(excluded.y + excluded.height + margin));
+    for (let y = top; y < bottom; y += step) {
+      for (let x = left; x < right; x += step) {
+        const inside = x >= excluded.x && x <= excluded.x + excluded.width &&
+          y >= excluded.y && y <= excluded.y + excluded.height;
+        if (!inside) add(x, y);
+      }
+    }
+  }
+  if (buckets.size === 0) {
+    for (let x = 0; x < canvas.width; x += step) {
+      add(x, 0);
+      add(x, canvas.height - 1);
+    }
+    for (let y = 0; y < canvas.height; y += step) {
+      add(0, y);
+      add(canvas.width - 1, y);
+    }
+  }
+  const dominant = [...buckets.values()].sort((a, b) => b.count - a.count)[0];
+  if (!dominant) return "#ffffff";
+  const channel = (value: number) => Math.round(value / dominant.count)
+    .toString(16)
+    .padStart(2, "0");
+  return `#${channel(dominant.red)}${channel(dominant.green)}${channel(dominant.blue)}`;
+}
+
 export class ImageProcessingEditor extends Modal {
   private readonly source: HTMLCanvasElement;
   private readonly preview: HTMLCanvasElement;
@@ -95,7 +156,7 @@ export class ImageProcessingEditor extends Modal {
   private sourceMaskColor = "#ffffff";
   private straightenDegrees = 0;
 
-  constructor(app: App, source: HTMLCanvasElement) {
+  constructor(app: App, source: HTMLCanvasElement, backgroundColor = estimateBackgroundColor(source)) {
     super(app);
     this.source = source;
     this.preview = document.createElement("canvas");
@@ -109,6 +170,10 @@ export class ImageProcessingEditor extends Modal {
     context.drawImage(source, 0, 0);
     this.pixels = context.getImageData(0, 0, source.width, source.height);
     this.mask = new Uint8Array(source.width * source.height);
+    if (/^#[0-9a-f]{6}$/i.test(backgroundColor)) {
+      this.fillColor = backgroundColor;
+      this.sourceMaskColor = backgroundColor;
+    }
     this.perspectiveCorners = [
       { x: 0, y: 0 },
       { x: source.width - 1, y: 0 },
@@ -345,6 +410,7 @@ export class ImageProcessingEditor extends Modal {
   }
 
   private pointerDown = (event: PointerEvent): void => {
+    if (event.pointerType === "touch") return;
     event.preventDefault();
     const point = this.point(event);
     if (this.operationMode === "select") {
@@ -370,6 +436,7 @@ export class ImageProcessingEditor extends Modal {
   };
 
   private pointerMove = (event: PointerEvent): void => {
+    if (event.pointerType === "touch") return;
     const point = this.point(event);
     if (this.operationMode === "perspective" && this.activeCorner >= 0) {
       this.perspectiveCorners[this.activeCorner] = point;
@@ -382,6 +449,7 @@ export class ImageProcessingEditor extends Modal {
   };
 
   private pointerUp = (event: PointerEvent): void => {
+    if (event.pointerType === "touch") return;
     if (this.brushDown) {
       this.operations.push({
         type: this.operationMode === "cleanup" ? "cleanup" : "mask-brush",

@@ -3382,7 +3382,7 @@ export class InkCanvas {
 
     this.stopPanInertia();
     const requestedTool = this.options.getTool();
-    if (event.pointerType === "touch" && requestedTool !== "shape") {
+    if (event.pointerType === "touch") {
       event.preventDefault();
       this.canvas.setPointerCapture(event.pointerId);
       this.activePointerId = event.pointerId;
@@ -4287,6 +4287,7 @@ export class InkCanvas {
         target.closest(
           "button, input, select, textarea, a, [contenteditable='true'], " +
             ".hand-note-whiteboard-controls, .hand-note-whiteboard-handle, " +
+            ".hand-note-image-region-overlay, .hand-note-image-pick-overlay, " +
             ".hand-note-selection-menu, .hand-note-selection-transform, " +
             ".hand-note-selection-handle, .hand-note-layer-panel"
         ) !== null

@@ -58,7 +58,6 @@ const TOOL_CONFIG: Array<{
   icon: string;
   label: string;
 }> = [
-  { tool: "hand", icon: "hand", label: "浏览与移动页面" },
   { tool: "pen", icon: "pen-tool", label: "钢笔" },
   { tool: "pencil", icon: "pencil", label: "铅笔" },
   { tool: "highlighter", icon: "highlighter", label: "荧光笔" },
@@ -115,6 +114,8 @@ export class AnnotationToolbar {
   private readonly whiteboardButton: HTMLButtonElement;
   private readonly saveButton: HTMLButtonElement;
   private readonly saveStatus: HTMLSpanElement;
+  private readonly overflowButton: HTMLButtonElement;
+  private readonly toolbarResizeObserver: ResizeObserver | null;
   private currentTool: AnnotationTool;
 
   constructor(options: AnnotationToolbarOptions) {
@@ -227,11 +228,46 @@ export class AnnotationToolbar {
       swatch.style.setProperty("--hand-note-swatch", color);
       swatch.style.backgroundColor = color;
       setControlTooltip(swatch, `颜色位 ${index + 1}`);
-      swatch.addEventListener("click", () => {
+      let longPressTimer: number | null = null;
+      let longPressed = false;
+      let startX = 0;
+      let startY = 0;
+      const cancelLongPress = () => {
+        if (longPressTimer !== null) {
+          window.clearTimeout(longPressTimer);
+          longPressTimer = null;
+        }
+      };
+      swatch.addEventListener("pointerdown", (event) => {
+        longPressed = false;
+        startX = event.clientX;
+        startY = event.clientY;
+        cancelLongPress();
+        longPressTimer = window.setTimeout(() => {
+          longPressTimer = null;
+          longPressed = true;
+          this.activeColorSlot = index;
+          this.setColor(this.colorSlots[index]);
+          this.toggleFloatingMenu(this.colorMenu, swatch);
+        }, 480);
+      });
+      swatch.addEventListener("pointermove", (event) => {
+        if (Math.hypot(event.clientX - startX, event.clientY - startY) > 8) {
+          cancelLongPress();
+        }
+      });
+      swatch.addEventListener("pointerup", cancelLongPress);
+      swatch.addEventListener("pointercancel", cancelLongPress);
+      swatch.addEventListener("contextmenu", (event) => event.preventDefault());
+      swatch.addEventListener("click", (event) => {
+        if (longPressed) {
+          longPressed = false;
+          event.preventDefault();
+          return;
+        }
         this.activeColorSlot = index;
         options.onColorChange(this.colorSlots[index]);
         this.setColor(this.colorSlots[index]);
-        this.toggleFloatingMenu(this.colorMenu, swatch);
       });
       this.colorButtons.push(swatch);
       colorGroup.append(swatch);
@@ -293,7 +329,6 @@ export class AnnotationToolbar {
       objectGroup.append(imageButton);
     }
 
-    const inputGroup = this.createGroup();
     this.pressureButton = createIconButton("gauge", "压感笔宽");
     this.pressureButton.addEventListener("click", () => {
       options.onPressureChange(!this.pressureButton.classList.contains("is-active"));
@@ -307,8 +342,6 @@ export class AnnotationToolbar {
         !this.pencilShortcutButton.classList.contains("is-active")
       );
     });
-    inputGroup.append(this.pressureButton, this.pencilShortcutButton);
-
     const documentGroup = this.createGroup();
     this.saveButton = createIconButton("save", "立即保存批注");
     this.saveButton.addEventListener("click", options.onSave);
@@ -354,12 +387,16 @@ export class AnnotationToolbar {
       navigationGroup.append(...options.navigationControls);
       this.element.append(this.createDivider(), navigationGroup);
     }
-    this.element.append(
-      this.createDivider(),
-      inputGroup,
-      this.createDivider(),
-      documentGroup
-    );
+    this.element.append(this.createDivider(), documentGroup);
+    this.overflowButton = createIconButton("chevron-right", "显示右侧工具");
+    this.overflowButton.classList.add("hand-note-toolbar-overflow");
+    this.overflowButton.addEventListener("click", () => {
+      this.element.scrollBy({
+        left: Math.max(180, this.element.clientWidth * 0.65),
+        behavior: "smooth"
+      });
+    });
+    this.element.append(this.overflowButton);
 
     this.setTool(options.initialTool);
     this.setColor(options.initialColor);
@@ -377,6 +414,14 @@ export class AnnotationToolbar {
     this.element.addEventListener("scroll", this.positionActiveFloatingMenu, {
       passive: true
     });
+    this.element.addEventListener("scroll", this.updateOverflowButton, {
+      passive: true
+    });
+    this.toolbarResizeObserver = typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver(this.updateOverflowButton);
+    this.toolbarResizeObserver?.observe(this.element);
+    window.requestAnimationFrame(this.updateOverflowButton);
     window.addEventListener("resize", this.positionActiveFloatingMenu);
     window.visualViewport?.addEventListener("resize", this.positionActiveFloatingMenu);
     window.visualViewport?.addEventListener("scroll", this.positionActiveFloatingMenu);
@@ -386,6 +431,8 @@ export class AnnotationToolbar {
   destroy(): void {
     this.closeAllFloatingMenus();
     this.element.removeEventListener("scroll", this.positionActiveFloatingMenu);
+    this.element.removeEventListener("scroll", this.updateOverflowButton);
+    this.toolbarResizeObserver?.disconnect();
     window.removeEventListener("resize", this.positionActiveFloatingMenu);
     window.visualViewport?.removeEventListener("resize", this.positionActiveFloatingMenu);
     window.visualViewport?.removeEventListener("scroll", this.positionActiveFloatingMenu);
@@ -837,6 +884,13 @@ export class AnnotationToolbar {
     if (active) {
       this.positionFloatingMenu(active.menu, active.anchor);
     }
+  };
+
+  private readonly updateOverflowButton = (): void => {
+    const contentWidth = this.element.scrollWidth - this.overflowButton.offsetWidth;
+    const hasOverflow = contentWidth > this.element.clientWidth + 4;
+    const atEnd = this.element.scrollLeft + this.element.clientWidth >= this.element.scrollWidth - 4;
+    this.overflowButton.classList.toggle("is-hidden", !hasOverflow || atEnd);
   };
 
   private readonly handleDocumentPointerDown = (event: PointerEvent): void => {

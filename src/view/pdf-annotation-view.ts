@@ -32,7 +32,10 @@ import {
 } from "../storage/annotation-store";
 import { readImageAsset, writeImageAsset } from "../storage/image-asset-store";
 import { AnnotationToolbar } from "./annotation-toolbar";
-import { ImageProcessingEditor } from "./image-processing-editor";
+import {
+  ImageProcessingEditor,
+  estimateBackgroundColor
+} from "./image-processing-editor";
 import { InkCanvas, InkCanvasHistoryState } from "./ink-canvas";
 import { LayerPanel } from "./layer-panel";
 import { createIconButton } from "./ui";
@@ -255,26 +258,6 @@ export class PdfAnnotationView extends ItemView {
   }
 
   private buildToolbar(): void {
-    const previousPageButton = createIconButton("chevron-up", "上一页");
-    previousPageButton.addEventListener("click", () => this.goToPage(this.currentPage - 1));
-
-    const pageInput = document.createElement("input");
-    pageInput.type = "number";
-    pageInput.min = "1";
-    pageInput.max = String(this.pdfDocument?.numPages ?? 1);
-    pageInput.value = "1";
-    pageInput.className = "hand-note-page-input";
-    pageInput.setAttribute("aria-label", "PDF 页码");
-    pageInput.addEventListener("change", () => {
-      const value = Number(pageInput.value);
-      if (Number.isFinite(value)) {
-        this.goToPage(value);
-      }
-    });
-
-    const nextPageButton = createIconButton("chevron-down", "下一页");
-    nextPageButton.addEventListener("click", () => this.goToPage(this.currentPage + 1));
-
     const zoomOutButton = createIconButton("zoom-out", "缩小");
     zoomOutButton.addEventListener("click", () => this.zoom(-0.1));
 
@@ -345,9 +328,6 @@ export class PdfAnnotationView extends ItemView {
         this.toggleLayerPanel(!this.layerPanel?.element.classList.contains("is-open"));
       },
       navigationControls: [
-        previousPageButton,
-        pageInput,
-        nextPageButton,
         zoomOutButton,
         zoomInButton
       ]
@@ -803,14 +783,10 @@ export class PdfAnnotationView extends ItemView {
 
   private async beginImageProcessing(): Promise<void> {
     if (!this.pdfDocument || !this.document) return;
-    if (this.whiteboard?.isEditing()) {
-      await this.whiteboard.beginImageProcessing(this.app);
-      return;
-    }
     await this.renderPage(this.currentPage);
     const pageEl = this.pageElements.get(this.currentPage);
     if (!pageEl) return;
-    new Notice("在当前 PDF 页拖动框选需要处理的区域", 3000);
+    new Notice("请用 Apple Pencil 在当前 PDF 页框选图片处理区域", 3000);
     const selection = await this.selectImageRegion(pageEl);
     if (!selection || selection.width < 8 || selection.height < 8) return;
 
@@ -838,6 +814,12 @@ export class PdfAnnotationView extends ItemView {
       const sourceY = Math.max(0, Math.round(normalized.minY * rendered.height));
       const sourceWidth = Math.max(1, Math.min(rendered.width - sourceX, Math.round((normalized.maxX - normalized.minX) * rendered.width)));
       const sourceHeight = Math.max(1, Math.min(rendered.height - sourceY, Math.round((normalized.maxY - normalized.minY) * rendered.height)));
+      const backgroundColor = estimateBackgroundColor(rendered, {
+        x: sourceX,
+        y: sourceY,
+        width: sourceWidth,
+        height: sourceHeight
+      });
       const region = document.createElement("canvas");
       region.width = sourceWidth;
       region.height = sourceHeight;
@@ -857,7 +839,7 @@ export class PdfAnnotationView extends ItemView {
       }
 
       const sourcePng = await canvasPng(region);
-      const editor = new ImageProcessingEditor(this.app, region);
+      const editor = new ImageProcessingEditor(this.app, region, backgroundColor);
       const result = await editor.openForResult();
       if (!result) return;
 
@@ -909,6 +891,9 @@ export class PdfAnnotationView extends ItemView {
       overlay.append(box);
       pageEl.append(overlay);
       let pointerId: number | null = null;
+      let touchPointerId: number | null = null;
+      let touchX = 0;
+      let touchY = 0;
       let startX = 0;
       let startY = 0;
       let current: LocalSelectionRect | null = null;
@@ -929,6 +914,14 @@ export class PdfAnnotationView extends ItemView {
         };
       };
       const down = (event: PointerEvent) => {
+        if (event.pointerType === "touch") {
+          touchPointerId = event.pointerId;
+          touchX = event.clientX;
+          touchY = event.clientY;
+          overlay.setPointerCapture(event.pointerId);
+          return;
+        }
+        if (event.pointerType !== "pen") return;
         event.preventDefault();
         event.stopPropagation();
         pointerId = event.pointerId;
@@ -938,6 +931,15 @@ export class PdfAnnotationView extends ItemView {
         overlay.setPointerCapture(event.pointerId);
       };
       const move = (event: PointerEvent) => {
+        if (touchPointerId === event.pointerId) {
+          const deltaX = touchX - event.clientX;
+          const deltaY = touchY - event.clientY;
+          touchX = event.clientX;
+          touchY = event.clientY;
+          this.scrollContainer.scrollLeft += deltaX;
+          this.scrollContainer.scrollTop += deltaY;
+          return;
+        }
         if (pointerId !== event.pointerId) return;
         event.preventDefault();
         const next = point(event);
@@ -953,11 +955,21 @@ export class PdfAnnotationView extends ItemView {
         box.style.height = `${current.height}px`;
       };
       const up = (event: PointerEvent) => {
+        if (touchPointerId === event.pointerId) {
+          touchPointerId = null;
+          return;
+        }
         if (pointerId !== event.pointerId) return;
         event.preventDefault();
         cleanup(current);
       };
-      const cancel = () => cleanup(null);
+      const cancel = (event: PointerEvent) => {
+        if (touchPointerId === event.pointerId) {
+          touchPointerId = null;
+          return;
+        }
+        cleanup(null);
+      };
       const keydown = (event: KeyboardEvent) => {
         if (event.key === "Escape") cleanup(null);
       };

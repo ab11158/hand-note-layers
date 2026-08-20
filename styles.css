@@ -13,11 +13,11 @@
   border-bottom: 1px solid var(--background-modifier-border);
   display: flex;
   flex: 0 0 auto;
-  gap: 8px;
-  min-height: 56px;
+  gap: 6px;
+  min-height: 44px;
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 8px 10px;
+  padding: 4px 6px;
 }
 
 .hand-note-toolbar-group {
@@ -37,8 +37,24 @@
 
 .hand-note-tool {
   flex: 0 0 auto;
-  height: 36px;
-  width: 36px;
+  height: 32px;
+  width: 32px;
+}
+
+.hand-note-toolbar-overflow {
+  background: var(--background-primary);
+  border-left: 1px solid var(--background-modifier-border);
+  box-shadow: -8px 0 12px var(--background-secondary);
+  flex: 0 0 32px;
+  margin-left: auto;
+  position: sticky;
+  right: 0;
+  z-index: 5;
+}
+
+.hand-note-toolbar-overflow.is-hidden {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .hand-note-tool.is-active {
@@ -180,7 +196,7 @@
 }
 
 .hand-note-image-modal {
-  background: rgba(30, 30, 30, 0.5);
+  background: var(--background-primary);
   border-radius: 6px;
   height: min(86vh, 900px);
   max-width: min(96vw, 1180px);
@@ -270,10 +286,6 @@
   text-align: right;
 }
 
-.theme-light .hand-note-image-modal {
-  background: rgba(255, 255, 255, 0.5);
-}
-
 @media (max-width: 600px) {
   .hand-note-image-modal {
     height: 92vh;
@@ -300,14 +312,28 @@
   border-radius: 999px;
   box-shadow: 0 0 0 1px var(--background-modifier-border);
   flex: 0 0 auto;
-  height: 20px;
+  height: 16px;
   padding: 0;
-  width: 30px;
+  width: 24px;
 }
 
 .hand-note-color-swatch.is-active {
   box-shadow: 0 0 0 2px var(--interactive-accent);
   transform: scale(1.08);
+}
+
+.hand-note-image-pick-overlay {
+  background: transparent;
+  cursor: crosshair;
+  inset: 0;
+  position: absolute;
+  touch-action: none;
+  z-index: 40;
+}
+
+.hand-note-markdown-body.is-picking-image img {
+  outline: 2px dashed var(--interactive-accent);
+  outline-offset: 3px;
 }
 
 .hand-note-color-menu {
@@ -366,7 +392,7 @@
 }
 
 .hand-note-size-menu {
-  padding: 8px 10px;
+  padding: 4px 6px;
   width: min(260px, calc(100vw - 16px));
 }
 
@@ -1127,8 +1153,8 @@
 
 @media (max-width: 600px) {
   .hand-note-toolbar {
-    gap: 6px;
-    padding: 6px 8px;
+    gap: 4px;
+    padding: 3px 5px;
   }
 
   .hand-note-scroll {
@@ -1144,12 +1170,12 @@
   }
 
   .hand-note-tool {
-    height: 34px;
-    width: 34px;
+    height: 32px;
+    width: 32px;
   }
 
   .hand-note-color-swatch {
-    height: 22px;
+    height: 16px;
     width: 22px;
   }
 }
