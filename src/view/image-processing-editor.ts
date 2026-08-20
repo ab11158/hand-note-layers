@@ -20,6 +20,8 @@ interface EditorSnapshot {
   operations: ImageOperation[];
 }
 
+type GeometricSelectionTool = "rectangle" | "free";
+
 function canvasPng(canvas: HTMLCanvasElement): Promise<ArrayBuffer> {
   return new Promise((resolve, reject) => {
     canvas.toBlob((blob) => {
@@ -132,6 +134,7 @@ export function estimateBackgroundColor(
 }
 
 export class ImageProcessingEditor extends Modal {
+  private static lastSelectionTool: GeometricSelectionTool = "rectangle";
   private readonly source: HTMLCanvasElement;
   private readonly preview: HTMLCanvasElement;
   private readonly context: CanvasRenderingContext2D;
@@ -143,7 +146,7 @@ export class ImageProcessingEditor extends Modal {
   private fillColor = "#ffffff";
   private feather = 1;
   private brushRadius = 14;
-  private operationMode: "select" | "brush" | "cleanup" | "perspective" = "select";
+  private operationMode: "select" | "rectangle" | "free" | "brush" | "cleanup" | "perspective" = "select";
   private brushDown = false;
   private operations: ImageOperation[] = [];
   private undoStack: EditorSnapshot[] = [];
@@ -154,7 +157,11 @@ export class ImageProcessingEditor extends Modal {
   private maskVisible = true;
   private sourceMaskEnabled = true;
   private sourceMaskColor = "#ffffff";
+  private readonly automaticMaskColor: string;
   private straightenDegrees = 0;
+  private selectionStart: ImagePoint | null = null;
+  private selectionPoints: ImagePoint[] = [];
+  private selectionClickTimer: number | null = null;
 
   constructor(app: App, source: HTMLCanvasElement, backgroundColor = estimateBackgroundColor(source)) {
     super(app);
@@ -170,6 +177,7 @@ export class ImageProcessingEditor extends Modal {
     context.drawImage(source, 0, 0);
     this.pixels = context.getImageData(0, 0, source.width, source.height);
     this.mask = new Uint8Array(source.width * source.height);
+    this.automaticMaskColor = /^#[0-9a-f]{6}$/i.test(backgroundColor) ? backgroundColor : "#ffffff";
     if (/^#[0-9a-f]{6}$/i.test(backgroundColor)) {
       this.fillColor = backgroundColor;
       this.sourceMaskColor = backgroundColor;
@@ -196,13 +204,14 @@ export class ImageProcessingEditor extends Modal {
     const toolbar = this.contentEl.createDiv({ cls: "hand-note-image-editor-toolbar" });
     toolbar.append(
       this.button("mouse-pointer-2", "智能选区", () => this.setMode("select")),
+      this.selectionToolControl(),
       this.button("plus", "增加选区", () => {
         this.selectionMode = "add";
-        this.setMode("brush");
+        this.setMode(ImageProcessingEditor.lastSelectionTool);
       }),
       this.button("minus", "减少选区", () => {
         this.selectionMode = "subtract";
-        this.setMode("brush");
+        this.setMode(ImageProcessingEditor.lastSelectionTool);
       }),
       this.button("refresh-cw", "反向选区", () => this.invertMask()),
       this.button("x", "清除选区", () => this.clearMask()),
@@ -230,9 +239,8 @@ export class ImageProcessingEditor extends Modal {
         this.maskVisible = value;
         this.render();
       }),
-      this.checkbox("遮挡原图", this.sourceMaskEnabled, (value) => (this.sourceMaskEnabled = value)),
       this.colorInput("填充色", this.fillColor, (value) => (this.fillColor = value)),
-      this.colorInput("遮挡色", this.sourceMaskColor, (value) => (this.sourceMaskColor = value)),
+      this.maskColorControl(),
       this.button("expand", "扩大 1px", () => this.morphMask(1, true)),
       this.button("shrink", "收缩 1px", () => this.morphMask(1, false)),
       this.button("wand-sparkles", "平滑", () => this.smoothMask()),
@@ -262,6 +270,7 @@ export class ImageProcessingEditor extends Modal {
   }
 
   onClose(): void {
+    if (this.selectionClickTimer !== null) window.clearTimeout(this.selectionClickTimer);
     this.preview.removeEventListener("pointerdown", this.pointerDown);
     this.preview.removeEventListener("pointermove", this.pointerMove);
     this.preview.removeEventListener("pointerup", this.pointerUp);
@@ -291,6 +300,85 @@ export class ImageProcessingEditor extends Modal {
     button.addEventListener("click", action);
     enhance?.(button);
     return button;
+  }
+
+  private selectionToolControl(): HTMLElement {
+    const wrapper = document.createElement("div");
+    wrapper.className = "hand-note-image-popover-control";
+    const button = this.button("scan-line", "选区方式（单击使用上次方式，双击选择）", () => undefined);
+    const menu = document.createElement("div");
+    menu.className = "hand-note-image-popover";
+    menu.hidden = true;
+    const choose = (tool: "all" | GeometricSelectionTool) => {
+      menu.hidden = true;
+      this.selectionMode = "replace";
+      if (tool === "all") {
+        this.selectAll();
+        return;
+      }
+      ImageProcessingEditor.lastSelectionTool = tool;
+      this.setMode(tool);
+    };
+    menu.append(
+      this.button("maximize", "全选", () => choose("all")),
+      this.button("square-dashed", "框选", () => choose("rectangle")),
+      this.button("lasso", "自由套索", () => choose("free"))
+    );
+    button.addEventListener("click", () => {
+      if (this.selectionClickTimer !== null) {
+        window.clearTimeout(this.selectionClickTimer);
+        this.selectionClickTimer = null;
+        menu.hidden = !menu.hidden;
+        return;
+      }
+      this.selectionClickTimer = window.setTimeout(() => {
+        this.selectionClickTimer = null;
+        this.selectionMode = "replace";
+        this.setMode(ImageProcessingEditor.lastSelectionTool);
+      }, 260);
+    });
+    wrapper.append(button, menu);
+    return wrapper;
+  }
+
+  private maskColorControl(): HTMLElement {
+    const wrapper = document.createElement("div");
+    wrapper.className = "hand-note-image-popover-control";
+    const button = this.button("layers", "遮挡色", () => {
+      menu.hidden = !menu.hidden;
+    });
+    button.style.setProperty("--hand-note-mask-color", this.sourceMaskColor);
+    button.classList.add("hand-note-image-mask-button");
+    const menu = document.createElement("div");
+    menu.className = "hand-note-image-popover hand-note-image-mask-menu";
+    menu.hidden = true;
+    const applyColor = (color: string) => {
+      this.sourceMaskEnabled = true;
+      this.sourceMaskColor = color;
+      button.style.setProperty("--hand-note-mask-color", color);
+      button.classList.remove("is-mask-disabled");
+      menu.hidden = true;
+    };
+    const custom = document.createElement("label");
+    custom.className = "hand-note-image-mask-custom";
+    custom.append(document.createTextNode("自定义"));
+    const color = document.createElement("input");
+    color.type = "color";
+    color.value = this.sourceMaskColor;
+    color.addEventListener("input", () => applyColor(color.value));
+    custom.append(color);
+    menu.append(
+      this.button("wand-sparkles", "自动背景色", () => applyColor(this.automaticMaskColor)),
+      this.button("square", "白色", () => applyColor("#ffffff")),
+      this.button("eye-off", "透明（关闭遮挡）", () => {
+        this.sourceMaskEnabled = false;
+        button.classList.add("is-mask-disabled");
+        menu.hidden = true;
+      }),
+      custom
+    );
+    wrapper.append(button, menu);
+    return wrapper;
   }
 
   private range(
@@ -343,13 +431,14 @@ export class ImageProcessingEditor extends Modal {
 
   private setMode(mode: typeof this.operationMode): void {
     this.operationMode = mode;
-    if (mode === "select") {
-      this.selectionMode = "replace";
-    }
     this.preview.dataset.mode = mode;
     new Notice(
       mode === "select"
         ? "点击图片中的颜色进行智能选区"
+        : mode === "rectangle"
+          ? "用 Apple Pencil 拖动矩形选区"
+          : mode === "free"
+            ? "用 Apple Pencil 绘制自由套索"
         : mode === "perspective"
           ? "拖动四个角点，完成后再次点击四角透视"
           : "在图片上拖动进行处理",
@@ -417,6 +506,14 @@ export class ImageProcessingEditor extends Modal {
       this.selectColor(point);
       return;
     }
+    if (this.operationMode === "rectangle" || this.operationMode === "free") {
+      this.snapshot();
+      this.selectionStart = point;
+      this.selectionPoints = [point];
+      this.preview.setPointerCapture(event.pointerId);
+      this.render();
+      return;
+    }
     if (this.operationMode === "perspective") {
       const nearest = this.perspectiveCorners
         .map((corner, index) => ({ index, distance: Math.hypot(corner.x - point.x, corner.y - point.y) }))
@@ -438,6 +535,12 @@ export class ImageProcessingEditor extends Modal {
   private pointerMove = (event: PointerEvent): void => {
     if (event.pointerType === "touch") return;
     const point = this.point(event);
+    if (this.selectionStart && (this.operationMode === "rectangle" || this.operationMode === "free")) {
+      if (this.operationMode === "rectangle") this.selectionPoints = [this.selectionStart, point];
+      else this.selectionPoints.push(point);
+      this.render();
+      return;
+    }
     if (this.operationMode === "perspective" && this.activeCorner >= 0) {
       this.perspectiveCorners[this.activeCorner] = point;
       this.render();
@@ -450,7 +553,20 @@ export class ImageProcessingEditor extends Modal {
 
   private pointerUp = (event: PointerEvent): void => {
     if (event.pointerType === "touch") return;
-    if (this.brushDown) {
+    if (this.selectionStart && (this.operationMode === "rectangle" || this.operationMode === "free")) {
+      const points = [...this.selectionPoints];
+      const start = this.selectionStart;
+      this.selectionStart = null;
+      this.selectionPoints = [];
+      if (this.operationMode === "rectangle" && points.length > 1) {
+        this.applyRectangleSelection(start, points[points.length - 1]);
+      } else if (this.operationMode === "free" && points.length > 2) {
+        this.applyLassoSelection(points);
+      } else {
+        this.undoStack.pop();
+        this.render();
+      }
+    } else if (this.brushDown) {
       this.operations.push({
         type: this.operationMode === "cleanup" ? "cleanup" : "mask-brush",
         ...(this.operationMode === "cleanup"
@@ -466,6 +582,55 @@ export class ImageProcessingEditor extends Modal {
       // Capture may already have been released.
     }
   };
+
+  private combineSelection(selected: Uint8Array): void {
+    for (let index = 0; index < this.mask.length; index += 1) {
+      if (this.selectionMode === "replace") this.mask[index] = selected[index] ? 255 : 0;
+      else if (this.selectionMode === "add" && selected[index]) this.mask[index] = 255;
+      else if (this.selectionMode === "subtract" && selected[index]) this.mask[index] = 0;
+    }
+  }
+
+  private selectAll(): void {
+    this.snapshot();
+    const selected = new Uint8Array(this.mask.length);
+    selected.fill(255);
+    this.combineSelection(selected);
+    this.operations.push({ type: "mask-all", mode: this.selectionMode });
+    this.render();
+  }
+
+  private applyRectangleSelection(start: ImagePoint, end: ImagePoint): void {
+    const selected = new Uint8Array(this.mask.length);
+    const minX = Math.max(0, Math.floor(Math.min(start.x, end.x)));
+    const maxX = Math.min(this.pixels.width - 1, Math.ceil(Math.max(start.x, end.x)));
+    const minY = Math.max(0, Math.floor(Math.min(start.y, end.y)));
+    const maxY = Math.min(this.pixels.height - 1, Math.ceil(Math.max(start.y, end.y)));
+    for (let y = minY; y <= maxY; y += 1) selected.fill(255, y * this.pixels.width + minX, y * this.pixels.width + maxX + 1);
+    this.combineSelection(selected);
+    this.operations.push({ type: "mask-rectangle", start, end, mode: this.selectionMode });
+    this.render();
+  }
+
+  private applyLassoSelection(points: ImagePoint[]): void {
+    const selected = new Uint8Array(this.mask.length);
+    const maskCanvas = document.createElement("canvas");
+    maskCanvas.width = this.pixels.width;
+    maskCanvas.height = this.pixels.height;
+    const context = maskCanvas.getContext("2d", { willReadFrequently: true });
+    if (!context) return;
+    context.beginPath();
+    context.moveTo(points[0].x, points[0].y);
+    points.slice(1).forEach((point) => context.lineTo(point.x, point.y));
+    context.closePath();
+    context.fillStyle = "#ffffff";
+    context.fill();
+    const data = context.getImageData(0, 0, maskCanvas.width, maskCanvas.height).data;
+    for (let index = 0; index < selected.length; index += 1) selected[index] = data[index * 4 + 3];
+    this.combineSelection(selected);
+    this.operations.push({ type: "mask-lasso", points, mode: this.selectionMode });
+    this.render();
+  }
 
   private selectColor(point: ImagePoint): void {
     this.snapshot();
@@ -514,11 +679,7 @@ export class ImageProcessingEditor extends Modal {
         if (matches(index)) selected[index] = 1;
       }
     }
-    for (let index = 0; index < this.mask.length; index += 1) {
-      if (this.selectionMode === "replace") this.mask[index] = selected[index] ? 255 : 0;
-      else if (this.selectionMode === "add" && selected[index]) this.mask[index] = 255;
-      else if (this.selectionMode === "subtract" && selected[index]) this.mask[index] = 0;
-    }
+    this.combineSelection(selected);
     this.operations.push({ type: "color-select", point, tolerance: this.tolerance, contiguous: this.contiguous, mode: this.selectionMode });
     this.render();
   }
@@ -846,6 +1007,25 @@ export class ImageProcessingEditor extends Modal {
         this.context.fill();
         this.context.stroke();
       });
+      this.context.restore();
+    }
+    if (this.selectionPoints.length > 0 && (this.operationMode === "rectangle" || this.operationMode === "free")) {
+      this.context.save();
+      this.context.strokeStyle = "#007aff";
+      this.context.fillStyle = "rgba(0, 122, 255, 0.18)";
+      this.context.lineWidth = Math.max(2, this.preview.width / 500);
+      this.context.setLineDash([Math.max(5, this.preview.width / 150), Math.max(3, this.preview.width / 250)]);
+      this.context.beginPath();
+      if (this.operationMode === "rectangle" && this.selectionPoints.length > 1) {
+        const [start, end] = this.selectionPoints;
+        this.context.rect(start.x, start.y, end.x - start.x, end.y - start.y);
+      } else {
+        this.selectionPoints.forEach((point, index) => index
+          ? this.context.lineTo(point.x, point.y)
+          : this.context.moveTo(point.x, point.y));
+      }
+      this.context.fill();
+      this.context.stroke();
       this.context.restore();
     }
   }

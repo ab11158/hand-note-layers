@@ -56,6 +56,9 @@ export type ImageOperation =
       mode: ImageSelectionMode;
     }
   | { type: "mask-brush"; points: ImagePoint[]; radius: number; mode: "add" | "subtract" }
+  | { type: "mask-all"; mode: ImageSelectionMode }
+  | { type: "mask-rectangle"; start: ImagePoint; end: ImagePoint; mode: ImageSelectionMode }
+  | { type: "mask-lasso"; points: ImagePoint[]; mode: ImageSelectionMode }
   | { type: "mask-invert" }
   | { type: "mask-clear" }
   | { type: "mask-grow"; radius: number }

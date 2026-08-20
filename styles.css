@@ -239,6 +239,56 @@
   white-space: nowrap;
 }
 
+.hand-note-image-popover-control {
+  position: relative;
+}
+
+.hand-note-image-popover {
+  align-items: stretch;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  bottom: calc(100% + 6px);
+  box-shadow: var(--shadow-s);
+  display: flex;
+  gap: 4px;
+  left: 0;
+  padding: 5px;
+  position: absolute;
+  z-index: 20;
+}
+
+.hand-note-image-popover[hidden] {
+  display: none;
+}
+
+.hand-note-image-mask-button::after {
+  background: var(--hand-note-mask-color, #ffffff);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 2px;
+  content: "";
+  height: 12px;
+  width: 18px;
+}
+
+.hand-note-image-mask-button.is-mask-disabled::after {
+  background: linear-gradient(to top right, transparent 43%, var(--text-error) 44%, var(--text-error) 56%, transparent 57%),
+    var(--hand-note-mask-color, #ffffff);
+}
+
+.hand-note-image-mask-menu {
+  align-items: center;
+}
+
+.hand-note-image-mask-custom {
+  align-items: center;
+  display: inline-flex;
+  font-size: var(--font-ui-smaller);
+  gap: 5px;
+  padding: 4px 6px;
+  white-space: nowrap;
+}
+
 .hand-note-image-editor-stage {
   align-items: center;
   background: rgba(0, 0, 0, 0.28);
@@ -263,7 +313,9 @@
 }
 
 .hand-note-image-editor-stage canvas[data-mode="brush"],
-.hand-note-image-editor-stage canvas[data-mode="cleanup"] {
+.hand-note-image-editor-stage canvas[data-mode="cleanup"],
+.hand-note-image-editor-stage canvas[data-mode="rectangle"],
+.hand-note-image-editor-stage canvas[data-mode="free"] {
   cursor: cell;
 }
 
