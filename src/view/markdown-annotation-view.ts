@@ -27,6 +27,7 @@ import {
   loadAnnotation,
   saveAnnotation
 } from "../storage/annotation-store";
+import { readImageAsset } from "../storage/image-asset-store";
 import { AnnotationToolbar } from "./annotation-toolbar";
 import { InkCanvas, InkCanvasViewport } from "./ink-canvas";
 import { LayerPanel } from "./layer-panel";
@@ -194,7 +195,8 @@ export class MarkdownAnnotationView extends ItemView {
       },
       onPencilShortcut: () => this.togglePenAndEraser(),
       onRequestTool: (tool) => this.setTool(tool),
-      onClipboardChange: (available) => this.annotationToolbar?.setPasteEnabled(available)
+      onClipboardChange: (available) => this.annotationToolbar?.setPasteEnabled(available),
+      loadImageAsset: (path) => readImageAsset(this.app, path)
     });
     this.surface.append(
       this.inkCanvas.canvas,
@@ -299,6 +301,13 @@ export class MarkdownAnnotationView extends ItemView {
       },
       onPaste: () => this.currentInkCanvas()?.pasteClipboardAtViewportCenter(),
       onWhiteboard: () => this.toggleWhiteboard(),
+      onImageProcess: () => {
+        if (this.whiteboard?.isEditing()) {
+          void this.whiteboard.beginImageProcessing(this.app);
+        } else {
+          new Notice("Markdown 首版请先打开临时白板，再使用图片处理");
+        }
+      },
       onUndo: () => this.currentInkCanvas()?.undo(),
       onRedo: () => this.currentInkCanvas()?.redo(),
       onClear: () => this.currentInkCanvas()?.clearActiveLayer(),
@@ -621,7 +630,8 @@ export class MarkdownAnnotationView extends ItemView {
       onDelete: () => this.deleteWhiteboard(),
       onPencilShortcut: () => this.togglePenAndEraser(),
       onRequestTool: (tool) => this.setTool(tool),
-      onClipboardChange: (available) => this.annotationToolbar?.setPasteEnabled(available)
+      onClipboardChange: (available) => this.annotationToolbar?.setPasteEnabled(available),
+      loadImageAsset: (path) => readImageAsset(this.app, path)
     });
     this.activeInkTarget = "whiteboard";
     this.annotationToolbar?.setWhiteboardActive(true);
@@ -681,7 +691,8 @@ export class MarkdownAnnotationView extends ItemView {
       onDelete: () => this.deleteWhiteboard(),
       onPencilShortcut: () => this.togglePenAndEraser(),
       onRequestTool: (tool) => this.setTool(tool),
-      onClipboardChange: (available) => this.annotationToolbar?.setPasteEnabled(available)
+      onClipboardChange: (available) => this.annotationToolbar?.setPasteEnabled(available),
+      loadImageAsset: (path) => readImageAsset(this.app, path)
     });
     this.activeInkTarget = "whiteboard";
     this.annotationToolbar?.setWhiteboardActive(true);

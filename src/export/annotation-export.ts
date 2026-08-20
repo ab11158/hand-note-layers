@@ -3,6 +3,7 @@ import { PDFDocument } from "pdf-lib";
 import { AnnotationDocument, cloneDocument } from "../model/annotation";
 import { getAnnotationPath, loadAnnotation } from "../storage/annotation-store";
 import { drawFreehandStroke } from "../view/freehand-renderer";
+import { readImageAsset } from "../storage/image-asset-store";
 
 const EXPORT_ROOT = "HandLayers 导出";
 const ELLIPSE_CONTROL_FACTOR = 2 * (Math.sqrt(2) - 1) / 3;
@@ -29,6 +30,7 @@ interface ExportedFileEntry {
   sourceCopy: string;
   annotationCopy: string;
   flattenedCopies: string[];
+  imageAssetCopies: string[];
   layerCount: number;
   visibleLayerCount: number;
   excludedDraftWhiteboards: number;
@@ -537,6 +539,7 @@ function drawCanvasStroke(
 }
 
 async function renderPdfOverlay(
+  app: App,
   document: AnnotationDocument,
   pageIndex: number,
   width: number,
@@ -547,6 +550,7 @@ async function renderPdfOverlay(
       layer.visible &&
       layer.opacity > 0 &&
       (layer.strokes.some((stroke) => stroke.pageIndex === pageIndex) ||
+        layer.images?.some((image) => image.pageIndex === pageIndex) ||
         layer.whiteboard?.bounds.pageIndex === pageIndex)
   );
   if (visibleLayers.length === 0) {
@@ -577,6 +581,35 @@ async function renderPdfOverlay(
       context.fillStyle = whiteboard.background;
       context.fillRect(left, top, boardWidth, boardHeight);
     }
+    for (const image of layer.images ?? []) {
+      if (image.pageIndex !== pageIndex) continue;
+      if (image.mask.enabled) {
+        context.fillStyle = image.mask.color;
+        context.fillRect(
+          image.sourceBounds.minX * width,
+          image.sourceBounds.minY * height,
+          (image.sourceBounds.maxX - image.sourceBounds.minX) * width,
+          (image.sourceBounds.maxY - image.sourceBounds.minY) * height
+        );
+      }
+      try {
+        const bytes = await readImageAsset(app, image.assetPath);
+        const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
+        const drawWidth = image.transform.width * width;
+        const drawHeight = image.transform.height * height;
+        const centerX = image.transform.x * width + drawWidth / 2;
+        const centerY = image.transform.y * height + drawHeight / 2;
+        context.save();
+        context.translate(centerX, centerY);
+        context.rotate((image.transform.rotation * Math.PI) / 180);
+        context.scale(image.transform.flipX ? -1 : 1, image.transform.flipY ? -1 : 1);
+        context.drawImage(bitmap, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+        context.restore();
+        bitmap.close();
+      } catch (error) {
+        console.error("HandLayers: failed to render exported image asset", error);
+      }
+    }
     for (const stroke of layer.strokes) {
       if (stroke.pageIndex === pageIndex) {
         drawCanvasStroke(context, stroke, width, height, layer.opacity);
@@ -599,7 +632,7 @@ export async function exportAnnotatedPdf(
     const page = pages[index];
     const width = page.getWidth();
     const height = page.getHeight();
-    const overlay = await renderPdfOverlay(document, index + 1, width, height);
+    const overlay = await renderPdfOverlay(app, document, index + 1, width, height);
     if (!overlay) {
       continue;
     }
@@ -763,6 +796,23 @@ export async function exportLayerPackage(
       data: encoder.encode(JSON.stringify(exported, null, 2))
     }
   ];
+  const includedAssets = new Set<string>();
+  for (const layer of exported.layers) {
+    for (const image of layer.images ?? []) {
+      for (const path of [image.sourceAssetPath, image.assetPath]) {
+        if (includedAssets.has(path)) continue;
+        includedAssets.add(path);
+        try {
+          entries.push({
+            name: `图片资源/${path.split("/").pop() ?? "image.png"}`,
+            data: new Uint8Array(await readImageAsset(app, path))
+          });
+        } catch (error) {
+          console.error("HandLayers: failed to add image asset to layer package", error);
+        }
+      }
+    }
+  }
   exported.layers.forEach((layer, index) => {
     const pages = new Set<number | undefined>();
     layer.strokes.forEach((stroke) => pages.add(stroke.pageIndex));
@@ -799,7 +849,8 @@ export async function exportLayerPackage(
             name: layer.name,
             visible: layer.visible,
             opacity: layer.opacity,
-            whiteboard: Boolean(layer.whiteboard)
+            whiteboard: Boolean(layer.whiteboard),
+            imageCount: layer.images?.length ?? 0
           })),
           note: "图层包包含所有已保存图层；未保存的临时白板不会进入导出。"
         },
@@ -846,12 +897,31 @@ async function exportOne(
     document,
     directory
   );
+  const imageAssetCopies: string[] = [];
+  const copiedAssets = new Set<string>();
+  for (const layer of document.layers) {
+    for (const image of layer.images ?? []) {
+      for (const assetPath of [image.sourceAssetPath, image.assetPath]) {
+        if (copiedAssets.has(assetPath)) continue;
+        copiedAssets.add(assetPath);
+        try {
+          const target = normalizePath(`${directory}/图片资源/${assetPath.split("/").pop() ?? "image.png"}`);
+          await ensureFolder(app, target.split("/").slice(0, -1).join("/"));
+          await app.vault.adapter.writeBinary(target, await readImageAsset(app, assetPath));
+          imageAssetCopies.push(target);
+        } catch (error) {
+          console.error("HandLayers: failed to copy exported image asset", error);
+        }
+      }
+    }
+  }
 
   return {
     sourcePath: source.path,
     sourceCopy,
     annotationCopy,
     flattenedCopies,
+    imageAssetCopies,
     layerCount: document.layers.length,
     visibleLayerCount: document.layers.filter(
       (layer) => layer.visible && layer.opacity > 0

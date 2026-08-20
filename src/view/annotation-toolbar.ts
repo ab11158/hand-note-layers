@@ -42,6 +42,7 @@ export interface AnnotationToolbarOptions {
   onShapeFillChange: (enabled: boolean) => void;
   onPaste: () => void;
   onWhiteboard: () => void;
+  onImageProcess?: () => void;
   onUndo: () => void;
   onRedo: () => void;
   onClear: () => void;
@@ -283,6 +284,14 @@ export class AnnotationToolbar {
     commonShapeWrapper.className = "hand-note-tool-menu-wrap";
     commonShapeWrapper.append(commonShapeButton, this.commonShapeMenu);
     objectGroup.append(textButton, shapeWrapper, commonShapeWrapper);
+    if (options.onImageProcess) {
+      const imageButton = createIconButton("scan-search", "图片处理");
+      imageButton.addEventListener("click", () => {
+        this.closeAllFloatingMenus();
+        options.onImageProcess?.();
+      });
+      objectGroup.append(imageButton);
+    }
 
     const inputGroup = this.createGroup();
     this.pressureButton = createIconButton("gauge", "压感笔宽");

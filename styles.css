@@ -162,6 +162,133 @@
   flex-direction: column;
 }
 
+.hand-note-image-region-overlay {
+  background: rgba(0, 0, 0, 0.08);
+  cursor: crosshair;
+  inset: 0;
+  position: absolute;
+  touch-action: none;
+  z-index: 40;
+}
+
+.hand-note-image-region-box {
+  background: rgba(0, 122, 255, 0.16);
+  border: 2px solid #007aff;
+  box-shadow: 0 0 0 1px #ffffff;
+  box-sizing: border-box;
+  position: absolute;
+}
+
+.hand-note-image-modal {
+  background: rgba(30, 30, 30, 0.5);
+  border-radius: 6px;
+  height: min(86vh, 900px);
+  max-width: min(96vw, 1180px);
+  width: min(96vw, 1180px);
+}
+
+.hand-note-image-editor {
+  display: grid;
+  gap: 8px;
+  grid-template-rows: auto auto minmax(180px, 1fr) auto;
+  height: 100%;
+  min-height: 0;
+  padding: 10px;
+}
+
+.hand-note-image-editor-toolbar,
+.hand-note-image-editor-settings,
+.hand-note-image-editor-footer {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.hand-note-image-editor-footer {
+  justify-content: flex-end;
+}
+
+.hand-note-image-action {
+  align-items: center;
+  display: inline-flex;
+  gap: 5px;
+  min-height: 34px;
+  padding: 5px 7px;
+  width: auto;
+}
+
+.hand-note-image-action span {
+  font-size: var(--font-ui-smaller);
+  white-space: nowrap;
+}
+
+.hand-note-image-editor-stage {
+  align-items: center;
+  background: rgba(0, 0, 0, 0.28);
+  display: flex;
+  justify-content: center;
+  min-height: 0;
+  overflow: auto;
+  position: relative;
+}
+
+.hand-note-image-editor-stage canvas {
+  display: block;
+  height: auto;
+  max-height: 100%;
+  max-width: 100%;
+  touch-action: none;
+  width: auto;
+}
+
+.hand-note-image-editor-stage canvas[data-mode="select"] {
+  cursor: crosshair;
+}
+
+.hand-note-image-editor-stage canvas[data-mode="brush"],
+.hand-note-image-editor-stage canvas[data-mode="cleanup"] {
+  cursor: cell;
+}
+
+.hand-note-image-range,
+.hand-note-image-check {
+  align-items: center;
+  display: inline-flex;
+  font-size: var(--font-ui-smaller);
+  gap: 5px;
+  min-height: 32px;
+  padding: 3px 6px;
+}
+
+.hand-note-image-range input {
+  width: 92px;
+}
+
+.hand-note-image-range output {
+  min-width: 24px;
+  text-align: right;
+}
+
+.theme-light .hand-note-image-modal {
+  background: rgba(255, 255, 255, 0.5);
+}
+
+@media (max-width: 600px) {
+  .hand-note-image-modal {
+    height: 92vh;
+    width: 98vw;
+  }
+
+  .hand-note-image-action span {
+    display: none;
+  }
+
+  .hand-note-image-editor {
+    padding: 6px;
+  }
+}
+
 .hand-note-color-group {
   gap: 5px;
 }

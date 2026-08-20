@@ -1,7 +1,8 @@
-import { setIcon } from "obsidian";
+import { App, Notice, setIcon } from "obsidian";
 import {
   AnnotationDocument,
   AnnotationLayer,
+  AnnotationImage,
   AnnotationTool,
   EraserMode,
   ShapeArrowHead,
@@ -9,9 +10,12 @@ import {
   ShapeLineStyle,
   WhiteboardDraft,
   createEmptyDocument,
-  generateId
+  generateId,
+  getActiveLayer
 } from "../model/annotation";
 import { InkCanvas, InkCanvasViewport } from "./ink-canvas";
+import { ImageProcessingEditor } from "./image-processing-editor";
+import { writeImageAsset } from "../storage/image-asset-store";
 
 export interface WhiteboardBounds {
   left: number;
@@ -43,6 +47,7 @@ export interface TemporaryWhiteboardOptions {
   onPencilShortcut?: () => void;
   onRequestTool?: (tool: AnnotationTool) => void;
   onClipboardChange?: (available: boolean) => void;
+  loadImageAsset?: (path: string) => Promise<ArrayBuffer>;
 }
 
 export function draftFromWhiteboardLayer(
@@ -136,6 +141,7 @@ export class TemporaryWhiteboard {
     this.document = createEmptyDocument("temporary-whiteboard");
     if (draft) {
       this.document.layers[0].strokes = draft.strokes;
+      this.document.layers[0].images = draft.images ?? [];
     }
 
     this.element = document.createElement("div");
@@ -176,7 +182,8 @@ export class TemporaryWhiteboard {
       },
       onPencilShortcut: options.onPencilShortcut,
       onRequestTool: options.onRequestTool,
-      onClipboardChange: options.onClipboardChange
+      onClipboardChange: options.onClipboardChange,
+      loadImageAsset: options.loadImageAsset
     });
     this.innerSurface.append(
       this.inkCanvas.canvas,
@@ -232,6 +239,7 @@ export class TemporaryWhiteboard {
       panY: this.panY,
       pageIndex,
       strokes: this.document.layers[0].strokes,
+      images: this.document.layers[0].images,
       updatedAt: Date.now()
     };
   }
@@ -271,14 +279,148 @@ export class TemporaryWhiteboard {
         y: (this.bounds.top + point.y * this.virtualHeight - this.panY) / hostHeight
       }))
     }));
+    const images = (this.document.layers[0].images ?? []).map((image) => ({
+      ...image,
+      pageIndex,
+      sourceBounds: {
+        minX: (this.bounds.left + image.sourceBounds.minX * this.virtualWidth - this.panX) / hostWidth,
+        minY: (this.bounds.top + image.sourceBounds.minY * this.virtualHeight - this.panY) / hostHeight,
+        maxX: (this.bounds.left + image.sourceBounds.maxX * this.virtualWidth - this.panX) / hostWidth,
+        maxY: (this.bounds.top + image.sourceBounds.maxY * this.virtualHeight - this.panY) / hostHeight,
+        pageIndex
+      },
+      transform: {
+        ...image.transform,
+        x: (this.bounds.left + image.transform.x * this.virtualWidth - this.panX) / hostWidth,
+        y: (this.bounds.top + image.transform.y * this.virtualHeight - this.panY) / hostHeight,
+        width: image.transform.width * this.virtualWidth / hostWidth,
+        height: image.transform.height * this.virtualHeight / hostHeight
+      }
+    }));
     return {
       id: generateId(),
       name,
       visible: true,
       opacity: 1,
       strokes,
+      images,
       whiteboard: { bounds, background: "#ffffff" }
     };
+  }
+
+  async beginImageProcessing(app: App): Promise<void> {
+    if (!this.isEditing()) return;
+    new Notice("在白板可见区域拖动框选需要处理的内容", 3000);
+    const selection = await this.selectRegion();
+    if (!selection || selection.width < 8 || selection.height < 8) return;
+    const canvas = this.inkCanvas.canvas;
+    const canvasRect = canvas.getBoundingClientRect();
+    const contentRect = this.content.getBoundingClientRect();
+    const ratioX = canvas.width / Math.max(1, canvasRect.width);
+    const ratioY = canvas.height / Math.max(1, canvasRect.height);
+    const localCanvasLeft = canvasRect.left - contentRect.left;
+    const localCanvasTop = canvasRect.top - contentRect.top;
+    const sourceX = Math.max(0, Math.round((selection.left - localCanvasLeft) * ratioX));
+    const sourceY = Math.max(0, Math.round((selection.top - localCanvasTop) * ratioY));
+    const sourceWidth = Math.max(1, Math.min(canvas.width - sourceX, Math.round(selection.width * ratioX)));
+    const sourceHeight = Math.max(1, Math.min(canvas.height - sourceY, Math.round(selection.height * ratioY)));
+    const region = document.createElement("canvas");
+    region.width = sourceWidth;
+    region.height = sourceHeight;
+    const context = region.getContext("2d");
+    if (!context) return;
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, sourceWidth, sourceHeight);
+    context.drawImage(canvas, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, sourceWidth, sourceHeight);
+    const sourcePng = await new Promise<ArrayBuffer>((resolve, reject) => {
+      region.toBlob((blob) => blob ? void blob.arrayBuffer().then(resolve, reject) : reject(new Error("Unable to encode whiteboard region")), "image/png");
+    });
+    const result = await new ImageProcessingEditor(app, region).openForResult();
+    if (!result) return;
+    const imageId = generateId();
+    const [sourceAssetPath, assetPath] = await Promise.all([
+      writeImageAsset(app, imageId, "source", sourcePng),
+      writeImageAsset(app, imageId, "result", result.png)
+    ]);
+    const sourceBounds = {
+      minX: (this.panX + selection.left) / this.virtualWidth,
+      minY: (this.panY + selection.top) / this.virtualHeight,
+      maxX: (this.panX + selection.left + selection.width) / this.virtualWidth,
+      maxY: (this.panY + selection.top + selection.height) / this.virtualHeight,
+      pageIndex: this.pageIndex
+    };
+    const normalizedWidth = sourceBounds.maxX - sourceBounds.minX;
+    const displayHeight = normalizedWidth * this.virtualWidth / Math.max(1, result.width / result.height) / this.virtualHeight;
+    const image: AnnotationImage = {
+      id: imageId,
+      sourceAssetPath,
+      assetPath,
+      pageIndex: this.pageIndex,
+      sourceBounds,
+      pixelWidth: result.width,
+      pixelHeight: result.height,
+      transform: {
+        x: sourceBounds.minX,
+        y: (sourceBounds.minY + sourceBounds.maxY - displayHeight) / 2,
+        width: normalizedWidth,
+        height: displayHeight,
+        rotation: 0,
+        flipX: false,
+        flipY: false
+      },
+      mask: { enabled: result.maskEnabled, color: result.maskColor },
+      operations: result.operations
+    };
+    this.inkCanvas.recordHistory();
+    const layer = getActiveLayer(this.document);
+    layer.images = [...(layer.images ?? []), image];
+    this.inkCanvas.render();
+    this.options.onChange?.(this.getDraft());
+    new Notice("已生成白板派生图片；原内容仍保留在下方", 4000);
+  }
+
+  private selectRegion(): Promise<{ left: number; top: number; width: number; height: number } | null> {
+    return new Promise((resolve) => {
+      const overlay = document.createElement("div");
+      overlay.className = "hand-note-image-region-overlay";
+      const box = document.createElement("div");
+      box.className = "hand-note-image-region-box";
+      overlay.append(box);
+      this.content.append(overlay);
+      let pointerId: number | null = null;
+      let startX = 0;
+      let startY = 0;
+      let result: { left: number; top: number; width: number; height: number } | null = null;
+      const finish = (value: typeof result) => {
+        overlay.remove();
+        resolve(value);
+      };
+      const local = (event: PointerEvent) => {
+        const rect = this.content.getBoundingClientRect();
+        return { x: Math.max(0, Math.min(rect.width, event.clientX - rect.left)), y: Math.max(0, Math.min(rect.height, event.clientY - rect.top)) };
+      };
+      overlay.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        pointerId = event.pointerId;
+        const point = local(event);
+        startX = point.x;
+        startY = point.y;
+        overlay.setPointerCapture(event.pointerId);
+      });
+      overlay.addEventListener("pointermove", (event) => {
+        if (event.pointerId !== pointerId) return;
+        const point = local(event);
+        result = { left: Math.min(startX, point.x), top: Math.min(startY, point.y), width: Math.abs(point.x - startX), height: Math.abs(point.y - startY) };
+        box.style.left = `${result.left}px`;
+        box.style.top = `${result.top}px`;
+        box.style.width = `${result.width}px`;
+        box.style.height = `${result.height}px`;
+      });
+      overlay.addEventListener("pointerup", (event) => {
+        if (event.pointerId === pointerId) finish(result);
+      });
+      overlay.addEventListener("pointercancel", () => finish(null));
+    });
   }
 
   private createControls(): HTMLDivElement {

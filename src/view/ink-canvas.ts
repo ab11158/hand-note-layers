@@ -1,6 +1,7 @@
 import { Notice, Platform, setIcon } from "obsidian";
 import {
   AnnotationDocument,
+  AnnotationImage,
   AnnotationLayer,
   AnnotationStroke,
   AnnotationTool,
@@ -54,6 +55,7 @@ export interface InkCanvasOptions {
   onPencilShortcut?: () => void;
   onRequestTool?: (tool: AnnotationTool) => void;
   onClipboardChange?: (available: boolean) => void;
+  loadImageAsset?: (path: string) => Promise<ArrayBuffer>;
   pageIndex?: number;
 }
 
@@ -229,6 +231,8 @@ export class InkCanvas {
     maxX: number;
     maxY: number;
   }>();
+  private readonly imageCache = new Map<string, { image: HTMLImageElement; url: string }>();
+  private readonly imageLoads = new Map<string, Promise<void>>();
 
   constructor(options: InkCanvasOptions) {
     this.options = options;
@@ -388,6 +392,9 @@ export class InkCanvas {
     this.shapeDwellMarker.remove();
     this.textEditorPortal.remove();
     this.liveCanvas.remove();
+    for (const cached of this.imageCache.values()) URL.revokeObjectURL(cached.url);
+    this.imageCache.clear();
+    this.imageLoads.clear();
     if (this.interactionFrame !== null) {
       window.cancelAnimationFrame(this.interactionFrame);
     }
@@ -1659,7 +1666,7 @@ export class InkCanvas {
     const document = this.options.getDocument();
     const layer = getActiveLayer(document);
 
-    if (layer.strokes.length === 0) {
+    if (layer.strokes.length === 0 && (layer.images?.length ?? 0) === 0) {
       return;
     }
 
@@ -1667,6 +1674,7 @@ export class InkCanvas {
     this.cancelSelection();
     this.detachConnectionsToDeleted(document, new Set(layer.strokes.map((stroke) => stroke.id)));
     layer.strokes = [];
+    layer.images = [];
     this.options.onDocumentChange(document);
   }
 
@@ -1728,6 +1736,12 @@ export class InkCanvas {
         this.context.fillStyle = layer.whiteboard.background;
         this.context.fillRect(left, top, width, height);
       }
+      for (const image of layer.images ?? []) {
+        if (this.options.pageIndex !== undefined && image.pageIndex !== this.options.pageIndex) {
+          continue;
+        }
+        this.drawImageObject(image, viewport);
+      }
       for (const stroke of layer.strokes) {
         if (stroke === this.activeStroke && this.isLiveStroke(stroke)) {
           continue;
@@ -1751,6 +1765,56 @@ export class InkCanvas {
       this.selectionOverlay.setSelection(this.lassoPoints, this.selectionBounds, viewport, rect);
     }
     this.positionTextEditor();
+  }
+
+  private drawImageObject(image: AnnotationImage, viewport: InkCanvasViewport): void {
+    const left = image.transform.x * viewport.documentWidth - viewport.offsetX;
+    const top = image.transform.y * viewport.documentHeight - viewport.offsetY;
+    const width = image.transform.width * viewport.documentWidth;
+    const height = image.transform.height * viewport.documentHeight;
+    if (left + width < 0 || top + height < 0 || left > viewport.width || top > viewport.height) {
+      return;
+    }
+    if (image.mask.enabled) {
+      this.context.fillStyle = image.mask.color;
+      this.context.fillRect(
+        image.sourceBounds.minX * viewport.documentWidth - viewport.offsetX,
+        image.sourceBounds.minY * viewport.documentHeight - viewport.offsetY,
+        (image.sourceBounds.maxX - image.sourceBounds.minX) * viewport.documentWidth,
+        (image.sourceBounds.maxY - image.sourceBounds.minY) * viewport.documentHeight
+      );
+    }
+    const cached = this.imageCache.get(image.assetPath);
+    if (!cached) {
+      this.requestImageAsset(image.assetPath);
+      return;
+    }
+    this.context.save();
+    this.context.translate(left + width / 2, top + height / 2);
+    this.context.rotate((image.transform.rotation * Math.PI) / 180);
+    this.context.scale(image.transform.flipX ? -1 : 1, image.transform.flipY ? -1 : 1);
+    this.context.drawImage(cached.image, -width / 2, -height / 2, width, height);
+    this.context.restore();
+  }
+
+  private requestImageAsset(path: string): void {
+    if (!this.options.loadImageAsset || this.imageLoads.has(path)) return;
+    const load = this.options.loadImageAsset(path).then((data) => new Promise<void>((resolve, reject) => {
+      const url = URL.createObjectURL(new Blob([data], { type: "image/png" }));
+      const image = new Image();
+      image.onload = () => {
+        this.imageCache.set(path, { image, url });
+        resolve();
+      };
+      image.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error(`Unable to load image asset ${path}`));
+      };
+      image.src = url;
+    })).then(() => this.render()).catch((error) => {
+      console.error("HandLayers: failed to load derived image", error);
+    }).finally(() => this.imageLoads.delete(path));
+    this.imageLoads.set(path, load);
   }
 
   private drawStroke(

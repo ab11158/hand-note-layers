@@ -40,6 +40,39 @@ export interface ShapeConnection {
 export type EraserMode = "partial" | "stroke";
 export type SelectionMode = "all" | "rectangle" | "free";
 
+export type ImageSelectionMode = "replace" | "add" | "subtract";
+
+export interface ImagePoint {
+  x: number;
+  y: number;
+}
+
+export type ImageOperation =
+  | {
+      type: "color-select";
+      point: ImagePoint;
+      tolerance: number;
+      contiguous: boolean;
+      mode: ImageSelectionMode;
+    }
+  | { type: "mask-brush"; points: ImagePoint[]; radius: number; mode: "add" | "subtract" }
+  | { type: "mask-invert" }
+  | { type: "mask-clear" }
+  | { type: "mask-grow"; radius: number }
+  | { type: "mask-shrink"; radius: number }
+  | { type: "mask-smooth" }
+  | { type: "fill"; color: string; feather: number }
+  | { type: "cleanup"; color: string; points: ImagePoint[]; radius: number }
+  | { type: "denoise"; color: string; maxArea: number }
+  | { type: "crop" }
+  | { type: "rotate"; degrees: -90 | 90 }
+  | { type: "flip"; axis: "horizontal" | "vertical" }
+  | { type: "straighten"; degrees: number }
+  | {
+      type: "perspective";
+      corners: [ImagePoint, ImagePoint, ImagePoint, ImagePoint];
+    };
+
 export interface AnnotationBounds {
   minX: number;
   minY: number;
@@ -77,6 +110,30 @@ export interface AnnotationStroke {
   fontSize?: number;
 }
 
+export interface AnnotationImage {
+  id: string;
+  sourceAssetPath: string;
+  assetPath: string;
+  pageIndex?: number;
+  sourceBounds: AnnotationBounds;
+  pixelWidth: number;
+  pixelHeight: number;
+  transform: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    rotation: number;
+    flipX: boolean;
+    flipY: boolean;
+  };
+  mask: {
+    enabled: boolean;
+    color: string;
+  };
+  operations: ImageOperation[];
+}
+
 export interface AnnotationLayer {
   id: string;
   name: string;
@@ -84,6 +141,7 @@ export interface AnnotationLayer {
   opacity: number;
   lastNonZeroOpacity?: number;
   strokes: AnnotationStroke[];
+  images?: AnnotationImage[];
   whiteboard?: {
     bounds: AnnotationBounds;
     background: string;
@@ -102,11 +160,12 @@ export interface WhiteboardDraft {
   panY: number;
   pageIndex?: number;
   strokes: AnnotationStroke[];
+  images?: AnnotationImage[];
   updatedAt: number;
 }
 
 export interface AnnotationDocument {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   sourcePath: string;
   layers: AnnotationLayer[];
   activeLayerId: string;
@@ -125,7 +184,7 @@ export function generateId(): string {
 export function createEmptyDocument(sourcePath: string): AnnotationDocument {
   const layer = createLayer("图层1");
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     sourcePath,
     layers: [layer],
     activeLayerId: layer.id,

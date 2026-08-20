@@ -9,6 +9,7 @@ import * as pdfjsLib from "pdfjs-dist";
 import pdfWorkerDataUrl from "pdfjs-dist/build/pdf.worker.min.mjs?worker-dataurl";
 import {
   AnnotationDocument,
+  AnnotationImage,
   AnnotationTool,
   EraserMode,
   SelectionMode,
@@ -17,6 +18,7 @@ import {
   ShapeLineStyle,
   cloneDocument,
   createLayer,
+  generateId,
   getActiveLayer,
   nextLayerName
 } from "../model/annotation";
@@ -28,7 +30,9 @@ import {
   loadAnnotation,
   saveAnnotation
 } from "../storage/annotation-store";
+import { readImageAsset, writeImageAsset } from "../storage/image-asset-store";
 import { AnnotationToolbar } from "./annotation-toolbar";
+import { ImageProcessingEditor } from "./image-processing-editor";
 import { InkCanvas, InkCanvasHistoryState } from "./ink-canvas";
 import { LayerPanel } from "./layer-panel";
 import { createIconButton } from "./ui";
@@ -58,6 +62,25 @@ function ensurePdfWorker(): void {
 
   pdfWorkerBlobUrl = createWorkerBlobUrl(pdfWorkerDataUrl);
   pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerBlobUrl;
+}
+
+function canvasPng(canvas: HTMLCanvasElement): Promise<ArrayBuffer> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error("Unable to encode selected PDF region"));
+        return;
+      }
+      void blob.arrayBuffer().then(resolve, reject);
+    }, "image/png");
+  });
+}
+
+interface LocalSelectionRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
 }
 
 export class PdfAnnotationView extends ItemView {
@@ -311,6 +334,7 @@ export class PdfAnnotationView extends ItemView {
       },
       onPaste: () => this.currentInkCanvas()?.pasteClipboardAtViewportCenter(),
       onWhiteboard: () => void this.toggleWhiteboard(),
+      onImageProcess: () => void this.beginImageProcessing(),
       onUndo: () => this.currentInkCanvas()?.undo(),
       onRedo: () => this.currentInkCanvas()?.redo(),
       onClear: () => this.currentInkCanvas()?.clearActiveLayer(),
@@ -521,6 +545,7 @@ export class PdfAnnotationView extends ItemView {
       onPencilShortcut: () => this.togglePenAndEraser(),
       onRequestTool: (tool) => this.setTool(tool),
       onClipboardChange: (available) => this.annotationToolbar?.setPasteEnabled(available),
+      loadImageAsset: (path) => readImageAsset(this.app, path),
       pageIndex
     });
     const history = this.pageHistories.get(pageIndex);
@@ -769,10 +794,179 @@ export class PdfAnnotationView extends ItemView {
       onDelete: () => this.deleteWhiteboard(),
       onPencilShortcut: () => this.togglePenAndEraser(),
       onRequestTool: (tool) => this.setTool(tool),
-      onClipboardChange: (available) => this.annotationToolbar?.setPasteEnabled(available)
+      onClipboardChange: (available) => this.annotationToolbar?.setPasteEnabled(available),
+      loadImageAsset: (path) => readImageAsset(this.app, path)
     });
     this.activeInkTarget = "whiteboard";
     this.annotationToolbar?.setWhiteboardActive(true);
+  }
+
+  private async beginImageProcessing(): Promise<void> {
+    if (!this.pdfDocument || !this.document) return;
+    if (this.whiteboard?.isEditing()) {
+      await this.whiteboard.beginImageProcessing(this.app);
+      return;
+    }
+    await this.renderPage(this.currentPage);
+    const pageEl = this.pageElements.get(this.currentPage);
+    if (!pageEl) return;
+    new Notice("在当前 PDF 页拖动框选需要处理的区域", 3000);
+    const selection = await this.selectImageRegion(pageEl);
+    if (!selection || selection.width < 8 || selection.height < 8) return;
+
+    try {
+      const page = await this.pdfDocument.getPage(this.currentPage);
+      const baseViewport = page.getViewport({ scale: 1 });
+      const maximumScale = Math.sqrt(8_000_000 / Math.max(1, baseViewport.width * baseViewport.height));
+      const scale = Math.max(1, Math.min(4, maximumScale));
+      const viewport = page.getViewport({ scale });
+      const rendered = document.createElement("canvas");
+      rendered.width = Math.max(1, Math.round(viewport.width));
+      rendered.height = Math.max(1, Math.round(viewport.height));
+      const renderedContext = rendered.getContext("2d");
+      if (!renderedContext) throw new Error("Unable to create PDF image capture canvas");
+      await page.render({ canvasContext: renderedContext, viewport }).promise;
+
+      const normalized = {
+        minX: selection.left / Math.max(1, pageEl.clientWidth),
+        minY: selection.top / Math.max(1, pageEl.clientHeight),
+        maxX: (selection.left + selection.width) / Math.max(1, pageEl.clientWidth),
+        maxY: (selection.top + selection.height) / Math.max(1, pageEl.clientHeight),
+        pageIndex: this.currentPage
+      };
+      const sourceX = Math.max(0, Math.round(normalized.minX * rendered.width));
+      const sourceY = Math.max(0, Math.round(normalized.minY * rendered.height));
+      const sourceWidth = Math.max(1, Math.min(rendered.width - sourceX, Math.round((normalized.maxX - normalized.minX) * rendered.width)));
+      const sourceHeight = Math.max(1, Math.min(rendered.height - sourceY, Math.round((normalized.maxY - normalized.minY) * rendered.height)));
+      const region = document.createElement("canvas");
+      region.width = sourceWidth;
+      region.height = sourceHeight;
+      region.getContext("2d")?.drawImage(rendered, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, sourceWidth, sourceHeight);
+      const includeAnnotations = window.confirm(
+        "图片提取默认只使用原始 PDF。\n\n选择“确定”会同时合并当前可见标注；选择“取消”则保持原始底图。"
+      );
+      if (includeAnnotations) {
+        const ink = this.currentDocumentInkCanvas()?.canvas;
+        if (ink) {
+          const inkX = Math.round(normalized.minX * ink.width);
+          const inkY = Math.round(normalized.minY * ink.height);
+          const inkWidth = Math.max(1, Math.round((normalized.maxX - normalized.minX) * ink.width));
+          const inkHeight = Math.max(1, Math.round((normalized.maxY - normalized.minY) * ink.height));
+          region.getContext("2d")?.drawImage(ink, inkX, inkY, inkWidth, inkHeight, 0, 0, sourceWidth, sourceHeight);
+        }
+      }
+
+      const sourcePng = await canvasPng(region);
+      const editor = new ImageProcessingEditor(this.app, region);
+      const result = await editor.openForResult();
+      if (!result) return;
+
+      const imageId = generateId();
+      const [sourceAssetPath, assetPath] = await Promise.all([
+        writeImageAsset(this.app, imageId, "source", sourcePng),
+        writeImageAsset(this.app, imageId, "result", result.png)
+      ]);
+      const normalizedWidth = normalized.maxX - normalized.minX;
+      const displayHeight = normalizedWidth * pageEl.clientWidth / Math.max(1, result.width / result.height) / Math.max(1, pageEl.clientHeight);
+      const image: AnnotationImage = {
+        id: imageId,
+        sourceAssetPath,
+        assetPath,
+        pageIndex: this.currentPage,
+        sourceBounds: normalized,
+        pixelWidth: result.width,
+        pixelHeight: result.height,
+        transform: {
+          x: normalized.minX,
+          y: (normalized.minY + normalized.maxY - displayHeight) / 2,
+          width: normalizedWidth,
+          height: displayHeight,
+          rotation: 0,
+          flipX: false,
+          flipY: false
+        },
+        mask: { enabled: result.maskEnabled, color: result.maskColor },
+        operations: result.operations
+      };
+      const inkCanvas = this.currentDocumentInkCanvas();
+      inkCanvas?.recordHistory();
+      const layer = getActiveLayer(this.document);
+      layer.images = [...(layer.images ?? []), image];
+      this.handleDocumentChange(this.document);
+      new Notice("已生成派生图片层；原 PDF 未被修改", 4000);
+    } catch (error) {
+      console.error("HandLayers: failed to process image region", error);
+      new Notice("图片处理失败，请查看开发者控制台");
+    }
+  }
+
+  private selectImageRegion(pageEl: HTMLElement): Promise<LocalSelectionRect | null> {
+    return new Promise((resolve) => {
+      const overlay = document.createElement("div");
+      overlay.className = "hand-note-image-region-overlay";
+      const box = document.createElement("div");
+      box.className = "hand-note-image-region-box";
+      overlay.append(box);
+      pageEl.append(overlay);
+      let pointerId: number | null = null;
+      let startX = 0;
+      let startY = 0;
+      let current: LocalSelectionRect | null = null;
+      const cleanup = (result: LocalSelectionRect | null) => {
+        overlay.removeEventListener("pointerdown", down);
+        overlay.removeEventListener("pointermove", move);
+        overlay.removeEventListener("pointerup", up);
+        overlay.removeEventListener("pointercancel", cancel);
+        window.removeEventListener("keydown", keydown);
+        overlay.remove();
+        resolve(result);
+      };
+      const point = (event: PointerEvent) => {
+        const rect = pageEl.getBoundingClientRect();
+        return {
+          x: Math.max(0, Math.min(rect.width, event.clientX - rect.left)),
+          y: Math.max(0, Math.min(rect.height, event.clientY - rect.top))
+        };
+      };
+      const down = (event: PointerEvent) => {
+        event.preventDefault();
+        event.stopPropagation();
+        pointerId = event.pointerId;
+        const next = point(event);
+        startX = next.x;
+        startY = next.y;
+        overlay.setPointerCapture(event.pointerId);
+      };
+      const move = (event: PointerEvent) => {
+        if (pointerId !== event.pointerId) return;
+        event.preventDefault();
+        const next = point(event);
+        current = {
+          left: Math.min(startX, next.x),
+          top: Math.min(startY, next.y),
+          width: Math.abs(next.x - startX),
+          height: Math.abs(next.y - startY)
+        };
+        box.style.left = `${current.left}px`;
+        box.style.top = `${current.top}px`;
+        box.style.width = `${current.width}px`;
+        box.style.height = `${current.height}px`;
+      };
+      const up = (event: PointerEvent) => {
+        if (pointerId !== event.pointerId) return;
+        event.preventDefault();
+        cleanup(current);
+      };
+      const cancel = () => cleanup(null);
+      const keydown = (event: KeyboardEvent) => {
+        if (event.key === "Escape") cleanup(null);
+      };
+      overlay.addEventListener("pointerdown", down);
+      overlay.addEventListener("pointermove", move);
+      overlay.addEventListener("pointerup", up);
+      overlay.addEventListener("pointercancel", cancel);
+      window.addEventListener("keydown", keydown);
+    });
   }
 
   private async editWhiteboardLayer(layerId: string): Promise<void> {
@@ -840,7 +1034,8 @@ export class PdfAnnotationView extends ItemView {
       onDelete: () => this.deleteWhiteboard(),
       onPencilShortcut: () => this.togglePenAndEraser(),
       onRequestTool: (tool) => this.setTool(tool),
-      onClipboardChange: (available) => this.annotationToolbar?.setPasteEnabled(available)
+      onClipboardChange: (available) => this.annotationToolbar?.setPasteEnabled(available),
+      loadImageAsset: (path) => readImageAsset(this.app, path)
     });
     this.activeInkTarget = "whiteboard";
     this.annotationToolbar?.setWhiteboardActive(true);

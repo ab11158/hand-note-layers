@@ -1,6 +1,6 @@
 {
   "name": "handlayers",
-  "version": "0.10.5",
+  "version": "0.11.0",
   "description": "Layer-based handwriting and drawing annotations for Markdown and PDF files, with Apple Pencil support.",
   "main": "main.js",
   "scripts": {

@@ -1,5 +1,6 @@
 import { App, TFile, normalizePath } from "obsidian";
 import {
+  AnnotationImage,
   AnnotationDocument,
   createEmptyDocument,
   getActiveLayer
@@ -7,6 +8,41 @@ import {
 
 const ANNOTATION_ROOT = ".hand-note-layers";
 const saveQueues = new Map<string, Promise<void>>();
+
+function migrateImage(image: Partial<AnnotationImage>): AnnotationImage | null {
+  if (
+    typeof image.id !== "string" ||
+    typeof image.sourceAssetPath !== "string" ||
+    typeof image.assetPath !== "string" ||
+    !image.sourceBounds ||
+    !image.transform
+  ) {
+    return null;
+  }
+  return {
+    id: image.id,
+    sourceAssetPath: image.sourceAssetPath,
+    assetPath: image.assetPath,
+    pageIndex: image.pageIndex,
+    sourceBounds: image.sourceBounds,
+    pixelWidth: Math.max(1, image.pixelWidth ?? 1),
+    pixelHeight: Math.max(1, image.pixelHeight ?? 1),
+    transform: {
+      x: image.transform.x ?? image.sourceBounds.minX,
+      y: image.transform.y ?? image.sourceBounds.minY,
+      width: image.transform.width ?? image.sourceBounds.maxX - image.sourceBounds.minX,
+      height: image.transform.height ?? image.sourceBounds.maxY - image.sourceBounds.minY,
+      rotation: image.transform.rotation ?? 0,
+      flipX: image.transform.flipX ?? false,
+      flipY: image.transform.flipY ?? false
+    },
+    mask: {
+      enabled: image.mask?.enabled ?? true,
+      color: image.mask?.color ?? "#ffffff"
+    },
+    operations: Array.isArray(image.operations) ? image.operations : []
+  };
+}
 
 export function getAnnotationPath(source: TFile): string {
   return normalizePath(`${ANNOTATION_ROOT}/${source.path}.json`);
@@ -52,7 +88,7 @@ function migrateDocument(value: unknown, sourcePath: string): AnnotationDocument
   }
 
   const document: AnnotationDocument = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     sourcePath: candidate.sourcePath ?? sourcePath,
     layers: candidate.layers.map((layer) => ({
       id: layer.id,
@@ -65,6 +101,11 @@ function migrateDocument(value: unknown, sourcePath: string): AnnotationDocument
       lastNonZeroOpacity:
         layer.lastNonZeroOpacity ?? ((layer.opacity ?? 1) > 0 ? layer.opacity ?? 1 : 1),
       whiteboard: layer.whiteboard,
+      images: Array.isArray(layer.images)
+        ? (layer.images
+            .map((image) => migrateImage(image))
+            .filter(Boolean) as AnnotationImage[])
+        : [],
       strokes: Array.isArray(layer.strokes)
         ? layer.strokes.map((stroke) => ({
             id: stroke.id,
@@ -100,7 +141,14 @@ function migrateDocument(value: unknown, sourcePath: string): AnnotationDocument
     activeLayerId: candidate.activeLayerId ?? candidate.layers[0]?.id ?? "",
     updatedAt: candidate.updatedAt ?? Date.now(),
     draftWhiteboards: Array.isArray(candidate.draftWhiteboards)
-      ? candidate.draftWhiteboards
+      ? candidate.draftWhiteboards.map((draft) => ({
+          ...draft,
+          images: Array.isArray(draft.images)
+            ? (draft.images
+                .map((image) => migrateImage(image))
+                .filter(Boolean) as AnnotationImage[])
+            : []
+        }))
       : []
   };
   getActiveLayer(document);
